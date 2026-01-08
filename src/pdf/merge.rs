@@ -136,6 +136,247 @@ pub fn merge_pdfs(options: &MergeOptions) -> Result<()> {
     Ok(())
 }
 
+/// Overlay a watermark PDF onto a source PDF
+///
+/// This function takes a source PDF and a watermark PDF and overlays the watermark
+/// content on top of each page of the source PDF. The watermark PDF should have the
+/// same number of pages as the source PDF, with each page containing the headers/footers
+/// to overlay.
+///
+/// # Arguments
+///
+/// * `source_path` - Path to the source PDF file
+/// * `watermark_path` - Path to the watermark PDF file (headers/footers)
+/// * `output_path` - Path where the combined PDF will be saved
+///
+/// # Example
+///
+/// ```no_run
+/// use pdf_handouts::pdf::overlay_watermark;
+/// use std::path::Path;
+///
+/// overlay_watermark(
+///     Path::new("source.pdf"),
+///     Path::new("watermark.pdf"),
+///     Path::new("output.pdf")
+/// ).expect("Failed to overlay");
+/// ```
+pub fn overlay_watermark(
+    source_path: &std::path::Path,
+    watermark_path: &std::path::Path,
+    output_path: &std::path::Path,
+) -> Result<()> {
+    use std::collections::HashMap;
+
+    // Load both documents
+    let mut source_doc = Document::load(source_path)?;
+    let watermark_doc = Document::load(watermark_path)?;
+
+    // Get pages from both documents
+    let source_pages = source_doc.get_pages();
+    let watermark_pages = watermark_doc.get_pages();
+
+    // Verify page counts match
+    if source_pages.len() != watermark_pages.len() {
+        return Err(Error::General(format!(
+            "Page count mismatch: source has {} pages, watermark has {} pages",
+            source_pages.len(),
+            watermark_pages.len()
+        )));
+    }
+
+    // Import all objects from watermark document into source document
+    // We need to renumber them to avoid ID conflicts
+    let watermark_max_id = watermark_doc.max_id;
+    let source_max_id = source_doc.max_id;
+    let id_offset = source_max_id + 1;
+
+    // Build complete ID map first
+    let mut id_map: HashMap<ObjectId, ObjectId> = HashMap::new();
+    for (old_id, _) in watermark_doc.objects.iter() {
+        let new_id = (old_id.0 + id_offset, old_id.1);
+        id_map.insert(*old_id, new_id);
+    }
+
+    // Now copy all objects from watermark to source, renumbering references
+    for (old_id, object) in watermark_doc.objects.iter() {
+        let new_id = id_map[old_id];
+
+        // Clone and renumber references in the object
+        let new_object = renumber_object_references(object, &id_map);
+        source_doc.objects.insert(new_id, new_object);
+    }
+
+    // Update source document's max_id
+    source_doc.max_id = watermark_max_id + id_offset;
+
+    // For each page in the source document, overlay the corresponding watermark page
+    for (i, (_page_num, source_page_id)) in source_pages.iter().enumerate() {
+        let watermark_page_num = (i + 1) as u32;
+
+        // Get the watermark page's content references and resources (now with new IDs)
+        if let Some((watermark_content_refs, watermark_resources)) = get_page_content_and_resources(&watermark_doc, watermark_page_num, &id_map)? {
+            // Get the source page object
+            let page_obj = source_doc.get_object_mut(*source_page_id)?;
+
+            if let Object::Dictionary(ref mut page_dict) = page_obj {
+                // 1. Merge content streams
+                let existing_content = page_dict.get(b"Contents").ok().cloned();
+
+                match existing_content {
+                    Some(Object::Reference(content_id)) => {
+                        // Convert single content stream to array and append watermark
+                        let mut new_content = vec![Object::Reference(content_id)];
+                        new_content.extend(watermark_content_refs);
+                        page_dict.set("Contents", Object::Array(new_content));
+                    }
+                    Some(Object::Array(mut content_array)) => {
+                        // Append watermark content to existing array
+                        content_array.extend(watermark_content_refs);
+                        page_dict.set("Contents", Object::Array(content_array));
+                    }
+                    _ => {
+                        // No existing content, use watermark content
+                        page_dict.set("Contents", Object::Array(watermark_content_refs));
+                    }
+                }
+
+                // 2. Merge Resources dictionaries
+                merge_resources(page_dict, &watermark_resources)?;
+            }
+        }
+    }
+
+    // Save the modified document
+    source_doc.save(output_path)?;
+
+    Ok(())
+}
+
+/// Renumber all object references in an object
+fn renumber_object_references(object: &Object, id_map: &std::collections::HashMap<ObjectId, ObjectId>) -> Object {
+    match object {
+        Object::Reference(old_id) => {
+            if let Some(new_id) = id_map.get(old_id) {
+                Object::Reference(*new_id)
+            } else {
+                Object::Reference(*old_id)
+            }
+        }
+        Object::Array(arr) => {
+            Object::Array(arr.iter().map(|obj| renumber_object_references(obj, id_map)).collect())
+        }
+        Object::Dictionary(dict) => {
+            let mut new_dict = Dictionary::new();
+            for (key, value) in dict.iter() {
+                new_dict.set(key.clone(), renumber_object_references(value, id_map));
+            }
+            Object::Dictionary(new_dict)
+        }
+        Object::Stream(stream) => {
+            let mut new_dict = Dictionary::new();
+            for (key, value) in stream.dict.iter() {
+                new_dict.set(key.clone(), renumber_object_references(value, id_map));
+            }
+            Object::Stream(lopdf::Stream {
+                dict: new_dict,
+                content: stream.content.clone(),
+                allows_compression: stream.allows_compression,
+                start_position: stream.start_position,
+            })
+        }
+        _ => object.clone(),
+    }
+}
+
+/// Get content references and resources from a watermark page with remapped IDs
+fn get_page_content_and_resources(
+    doc: &Document,
+    page_num: u32,
+    id_map: &std::collections::HashMap<ObjectId, ObjectId>,
+) -> Result<Option<(Vec<Object>, Object)>> {
+    let pages = doc.get_pages();
+
+    for (pg_num, page_id) in pages {
+        if pg_num == page_num {
+            let page_obj = doc.get_object(page_id)?;
+
+            if let Object::Dictionary(ref page_dict) = page_obj {
+                // Get content references
+                let content_refs = if let Ok(content) = page_dict.get(b"Contents") {
+                    // Remap the content references
+                    let remapped_content = renumber_object_references(content, id_map);
+
+                    // Convert to array if it's a single reference
+                    match remapped_content {
+                        Object::Reference(id) => vec![Object::Reference(id)],
+                        Object::Array(arr) => arr,
+                        _ => vec![remapped_content],
+                    }
+                } else {
+                    vec![]
+                };
+
+                // Get resources (remapped)
+                let resources = if let Ok(res) = page_dict.get(b"Resources") {
+                    renumber_object_references(res, id_map)
+                } else {
+                    // If no Resources, create empty dictionary
+                    Object::Dictionary(Dictionary::new())
+                };
+
+                return Ok(Some((content_refs, resources)));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Merge watermark resources into the page's resources dictionary
+fn merge_resources(page_dict: &mut Dictionary, watermark_resources: &Object) -> Result<()> {
+    // Get existing resources (or create empty if none)
+    let mut merged_resources = if let Ok(existing) = page_dict.get(b"Resources") {
+        existing.clone()
+    } else {
+        Object::Dictionary(Dictionary::new())
+    };
+
+    // If existing resources is a dictionary, merge in watermark resources
+    if let (Object::Dictionary(ref mut merged_dict), Object::Dictionary(watermark_dict)) =
+        (&mut merged_resources, watermark_resources) {
+
+        // Merge each resource type (Font, ExtGState, XObject, etc.)
+        for (key, value) in watermark_dict.iter() {
+            if let Ok(existing_value) = merged_dict.get(key) {
+                // If both have this resource type, merge the subdictionaries
+                if let (Object::Dictionary(existing_subdict), Object::Dictionary(watermark_subdict)) =
+                    (existing_value.clone(), value) {
+
+                    let mut merged_subdict = existing_subdict.clone();
+                    // Merge the subdictionary entries
+                    for (subkey, subvalue) in watermark_subdict.iter() {
+                        merged_subdict.set(subkey.clone(), subvalue.clone());
+                    }
+
+                    merged_dict.set(key.clone(), Object::Dictionary(merged_subdict));
+                } else {
+                    // Not both dictionaries, watermark overwrites
+                    merged_dict.set(key.clone(), value.clone());
+                }
+            } else {
+                // Key doesn't exist in merged, add it
+                merged_dict.set(key.clone(), value.clone());
+            }
+        }
+    }
+
+    // Update the page's Resources
+    page_dict.set("Resources", merged_resources);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -83,14 +83,32 @@ pub struct FooterLayout {
 
 /// Calculate the safe content area that won't overlap headers/footers
 ///
-/// Returns (left, top, right, bottom) coordinates in the coordinate system
+/// Returns (left, top, right, bottom) coordinates measured from the page origin.
+/// The coordinate system has origin at bottom-left of the page.
 pub fn calculate_safe_area(
-    _page: &PageDimensions,
-    _header_height: Length,
-    _footer_height: Length,
+    page: &PageDimensions,
+    header_height: Length,
+    footer_height: Length,
 ) -> (Length, Length, Length, Length) {
-    // TODO: Implement safe area calculation
-    todo!("Safe area calculation not yet implemented")
+    let left = Length::from_mm(0.0);
+    let bottom = footer_height;
+    let right = page.width;
+    let top = Length::from_mm(page.height.mm() - header_height.mm());
+
+    (left, top, right, bottom)
+}
+
+/// Standard margins for typical document layouts
+impl Margins {
+    /// Standard 1-inch margins on all sides
+    pub fn standard() -> Self {
+        Self::uniform(Length::from_inches(1.0))
+    }
+
+    /// Narrow margins (0.5 inches)
+    pub fn narrow() -> Self {
+        Self::uniform(Length::from_inches(0.5))
+    }
 }
 
 #[cfg(test)]
@@ -111,5 +129,32 @@ mod tests {
         assert!((letter.width.mm() - 215.9).abs() < 0.1);
         // 11 inches = 279.4 mm
         assert!((letter.height.mm() - 279.4).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_calculate_safe_area() {
+        let page = PageDimensions::letter();
+        let header_height = Length::from_mm(20.0);
+        let footer_height = Length::from_mm(15.0);
+
+        let (left, top, right, bottom) = calculate_safe_area(&page, header_height, footer_height);
+
+        // Left should be at origin
+        assert_eq!(left.mm(), 0.0);
+        // Right should be at page width
+        assert_eq!(right.mm(), page.width.mm());
+        // Bottom should be above footer
+        assert_eq!(bottom.mm(), 15.0);
+        // Top should be below header
+        assert_eq!(top.mm(), page.height.mm() - 20.0);
+    }
+
+    #[test]
+    fn test_standard_margins() {
+        let margins = Margins::standard();
+        assert_eq!(margins.top.mm(), 25.4); // 1 inch
+        assert_eq!(margins.bottom.mm(), 25.4);
+        assert_eq!(margins.left.mm(), 25.4);
+        assert_eq!(margins.right.mm(), 25.4);
     }
 }

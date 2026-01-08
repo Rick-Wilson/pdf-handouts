@@ -16,6 +16,8 @@ lopdf = "0.38"  # Updated to latest version for better page tree handling
 
 # PDF creation for headers/footers
 krilla = "0.3"
+tiny-skia-path = "0.11"
+rustybuzz = "0.18"  # Text shaping and measurement
 
 # CLI framework
 clap = { version = "4.5", features = ["derive", "cargo"] }

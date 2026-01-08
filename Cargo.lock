@@ -877,8 +877,10 @@ dependencies = [
  "glob",
  "krilla",
  "lopdf",
+ "rustybuzz",
  "tempfile",
  "thiserror 1.0.69",
+ "tiny-skia-path",
 ]
 
 [[package]]
