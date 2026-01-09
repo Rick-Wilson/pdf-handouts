@@ -54,14 +54,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nStep 2: Adding headers/footers directly to merged PDF...");
 
     // Step 3: Add headers/footers directly
-    // Using the new placeholder syntax:
+    // Using the new placeholder and font tag syntax:
     // - [page] = current page number
     // - [pages] = total page count
     // - [date] = formatted date
     // - | or [br] = line break
+    // - [font italic]...[/font] = italic text
+    // - [font bold]...[/font] = bold text
     let header_footer_options = HeaderFooterOptions {
         title: Some("Bridge Class Handout".to_string()),
-        footer_left: Some("Stoneridge Creek|Community Center".to_string()),
+        footer_left: Some("Stoneridge Creek|[font italic]Community Center[/font]".to_string()),
         footer_center: Some("Presented by:|Rick Wilson".to_string()),
         footer_right: Some("Page [page] of [pages]|[date]".to_string()),
         date: Some(NaiveDate::from_ymd_opt(2026, 1, 14).unwrap()),

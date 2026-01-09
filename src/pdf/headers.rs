@@ -846,11 +846,8 @@ fn generate_header_footer_content(
         for (i, line) in lines.iter().enumerate() {
             // First line at top, subsequent lines below (Y decreases)
             let y = footer_top - (i as f32 * line_height);
-            content.push_str("BT\n");
-            content.push_str(&format!("/F1 {} Tf\n", options.footer_font_size));
-            content.push_str(&format!("1 0 0 1 50 {} Tm\n", y));
-            content.push_str(&format!("({}) Tj\n", escape_pdf_string(line)));
-            content.push_str("ET\n");
+            // Use font tag rendering for styled text
+            content.push_str(&generate_line_with_font_tags(line, 50.0, y, options.footer_font_size));
         }
     }
 
@@ -863,14 +860,11 @@ fn generate_header_footer_content(
         let footer_top = 30.0 + ((num_lines - 1) as f32 * line_height);
         for (i, line) in lines.iter().enumerate() {
             let y = footer_top - (i as f32 * line_height);
-            let text_width = estimate_text_width(line, options.footer_font_size);
+            // Use width calculation that excludes font tags
+            let text_width = estimate_text_width_with_tags(line, options.footer_font_size);
             let x = (page_width - text_width) / 2.0;
-
-            content.push_str("BT\n");
-            content.push_str(&format!("/F1 {} Tf\n", options.footer_font_size));
-            content.push_str(&format!("1 0 0 1 {} {} Tm\n", x, y));
-            content.push_str(&format!("({}) Tj\n", escape_pdf_string(line)));
-            content.push_str("ET\n");
+            // Use font tag rendering for styled text
+            content.push_str(&generate_line_with_font_tags(line, x, y, options.footer_font_size));
         }
     }
 
@@ -883,14 +877,11 @@ fn generate_header_footer_content(
         let footer_top = 30.0 + ((num_lines.saturating_sub(1)) as f32 * line_height);
         for (i, line) in lines.iter().enumerate() {
             let y = footer_top - (i as f32 * line_height);
-            let text_width = estimate_text_width(line, options.footer_font_size);
+            // Use width calculation that excludes font tags
+            let text_width = estimate_text_width_with_tags(line, options.footer_font_size);
             let x = page_width - 50.0 - text_width; // Right-aligned with margin
-
-            content.push_str("BT\n");
-            content.push_str(&format!("/F1 {} Tf\n", options.footer_font_size));
-            content.push_str(&format!("1 0 0 1 {} {} Tm\n", x, y));
-            content.push_str(&format!("({}) Tj\n", escape_pdf_string(line)));
-            content.push_str("ET\n");
+            // Use font tag rendering for styled text
+            content.push_str(&generate_line_with_font_tags(line, x, y, options.footer_font_size));
         }
     }
 
@@ -924,6 +915,159 @@ fn expand_placeholders(text: &str, page_num: usize, total_pages: usize, date: Op
     }
 
     result
+}
+
+/// Font style for inline text formatting
+#[derive(Debug, Clone, Default)]
+struct FontStyle {
+    italic: bool,
+    bold: bool,
+}
+
+/// A segment of text with optional font styling
+#[derive(Debug, Clone)]
+struct TextSegment {
+    text: String,
+    style: FontStyle,
+}
+
+/// Parse text containing [font]...[/font] tags into segments
+///
+/// Syntax: `[font italic]text[/font]` or `[font bold]text[/font]`
+/// Multiple styles: `[font bold italic]text[/font]`
+/// Underscores replace spaces in font names: `[font 12pt Liberation_Serif]`
+fn parse_font_tags(text: &str) -> Vec<TextSegment> {
+    let mut segments = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        // Look for [font ...] tag
+        if let Some(font_start) = remaining.find("[font ") {
+            // Add text before the tag as plain segment
+            if font_start > 0 {
+                segments.push(TextSegment {
+                    text: remaining[..font_start].to_string(),
+                    style: FontStyle::default(),
+                });
+            }
+
+            // Find the closing ] of the opening tag
+            if let Some(tag_end) = remaining[font_start..].find(']') {
+                let tag_end = font_start + tag_end;
+                let tag_content = &remaining[font_start + 6..tag_end]; // Skip "[font "
+
+                // Parse style from tag content
+                let style = parse_font_style(tag_content);
+
+                // Find the closing [/font] tag
+                let after_tag = &remaining[tag_end + 1..];
+                if let Some(close_pos) = after_tag.find("[/font]") {
+                    // Extract styled text
+                    let styled_text = &after_tag[..close_pos];
+                    segments.push(TextSegment {
+                        text: styled_text.to_string(),
+                        style,
+                    });
+
+                    // Continue after [/font]
+                    remaining = &after_tag[close_pos + 7..];
+                } else {
+                    // No closing tag found, treat rest as styled
+                    segments.push(TextSegment {
+                        text: after_tag.to_string(),
+                        style,
+                    });
+                    break;
+                }
+            } else {
+                // Malformed tag, add rest as plain text
+                segments.push(TextSegment {
+                    text: remaining.to_string(),
+                    style: FontStyle::default(),
+                });
+                break;
+            }
+        } else {
+            // No more font tags, add rest as plain text
+            segments.push(TextSegment {
+                text: remaining.to_string(),
+                style: FontStyle::default(),
+            });
+            break;
+        }
+    }
+
+    segments
+}
+
+/// Parse font style from tag content like "italic", "bold", "bold italic"
+fn parse_font_style(tag_content: &str) -> FontStyle {
+    let lower = tag_content.to_lowercase();
+    FontStyle {
+        italic: lower.contains("italic"),
+        bold: lower.contains("bold"),
+    }
+}
+
+/// Generate PDF content for a single line with font tag support
+fn generate_line_with_font_tags(
+    line: &str,
+    x: f32,
+    y: f32,
+    font_size: f32,
+) -> String {
+    let segments = parse_font_tags(line);
+    let mut content = String::new();
+    let mut current_x = x;
+
+    for segment in segments {
+        if segment.text.is_empty() {
+            continue;
+        }
+
+        content.push_str("BT\n");
+        content.push_str(&format!("/F1 {} Tf\n", font_size));
+
+        // Apply transformations for style
+        if segment.style.italic && segment.style.bold {
+            // Bold italic: shear + thicker stroke
+            // Matrix: [1 0 tan(12°) 1 x y] for italic shear
+            let shear = 0.21; // tan(12°) ≈ 0.21
+            content.push_str(&format!("1 0 {} 1 {} {} Tm\n", shear, current_x, y));
+            content.push_str("2 Tr\n"); // Stroke + fill for bold effect
+            content.push_str(&format!("{} w\n", font_size * 0.03)); // Stroke width
+        } else if segment.style.italic {
+            // Italic: apply shear transformation
+            let shear = 0.21; // tan(12°) ≈ 0.21
+            content.push_str(&format!("1 0 {} 1 {} {} Tm\n", shear, current_x, y));
+            content.push_str("0 Tr\n"); // Fill only
+        } else if segment.style.bold {
+            // Bold: use stroke + fill rendering mode
+            content.push_str(&format!("1 0 0 1 {} {} Tm\n", current_x, y));
+            content.push_str("2 Tr\n"); // Stroke + fill for bold effect
+            content.push_str(&format!("{} w\n", font_size * 0.03)); // Stroke width
+        } else {
+            // Normal text
+            content.push_str(&format!("1 0 0 1 {} {} Tm\n", current_x, y));
+            content.push_str("0 Tr\n"); // Fill only
+        }
+
+        content.push_str(&format!("({}) Tj\n", escape_pdf_string(&segment.text)));
+        content.push_str("ET\n");
+
+        // Advance x position for next segment
+        current_x += estimate_text_width(&segment.text, font_size);
+    }
+
+    content
+}
+
+/// Estimate text width excluding font tags
+fn estimate_text_width_with_tags(text: &str, font_size: f32) -> f32 {
+    let segments = parse_font_tags(text);
+    segments.iter()
+        .map(|s| estimate_text_width(&s.text, font_size))
+        .sum()
 }
 
 /// Parse text with line break markers
