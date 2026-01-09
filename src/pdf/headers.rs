@@ -85,10 +85,14 @@ pub struct HeaderFooterOptions {
     pub show_page_numbers: bool,
     /// Whether to show total page count (e.g., "Page 1 of 10")
     pub show_total_page_count: bool,
-    /// Title font size in points
+    /// Title font size in points (legacy - prefer header_font)
     pub title_font_size: f32,
-    /// Footer font size in points
+    /// Footer font size in points (legacy - prefer footer_font)
     pub footer_font_size: f32,
+    /// Header font specification (overrides title_font_size if set)
+    pub header_font: Option<FontSpec>,
+    /// Footer font specification (overrides footer_font_size if set)
+    pub footer_font: Option<FontSpec>,
 }
 
 impl Default for HeaderFooterOptions {
@@ -103,7 +107,45 @@ impl Default for HeaderFooterOptions {
             show_total_page_count: false,
             title_font_size: 24.0,
             footer_font_size: 14.0,
+            header_font: None,
+            footer_font: None,
         }
+    }
+}
+
+impl HeaderFooterOptions {
+    /// Get effective header font size
+    pub fn effective_header_font_size(&self) -> f32 {
+        self.header_font
+            .as_ref()
+            .and_then(|f| f.size)
+            .unwrap_or(self.title_font_size)
+    }
+
+    /// Get effective footer font size
+    pub fn effective_footer_font_size(&self) -> f32 {
+        self.footer_font
+            .as_ref()
+            .and_then(|f| f.size)
+            .unwrap_or(self.footer_font_size)
+    }
+
+    /// Get header color as PDF RGB string (e.g., "0 0 0" for black)
+    pub fn header_color_pdf(&self) -> String {
+        self.header_font
+            .as_ref()
+            .and_then(|f| f.color)
+            .map(|(r, g, b)| format!("{:.3} {:.3} {:.3}", r, g, b))
+            .unwrap_or_else(|| "0 0 0".to_string())
+    }
+
+    /// Get footer color as PDF RGB string (e.g., "0 0 0" for black)
+    pub fn footer_color_pdf(&self) -> String {
+        self.footer_font
+            .as_ref()
+            .and_then(|f| f.color)
+            .map(|(r, g, b)| format!("{:.3} {:.3} {:.3}", r, g, b))
+            .unwrap_or_else(|| "0 0 0".to_string())
     }
 }
 
@@ -806,9 +848,9 @@ fn generate_header_footer_content(
     let page_width = 612.0;
     let page_height = 792.0;
 
-    // Form XObjects have their own coordinate system, so we don't need to worry
-    // about transformations from the page content. Just set up our graphics state.
-    content.push_str("0 g\n"); // gray fill color (0 = black)
+    // Get effective font sizes from options (respects FontSpec if set)
+    let header_font_size = options.effective_header_font_size();
+    let footer_font_size = options.effective_footer_font_size();
 
     // Add title on first page
     if is_first_page {
@@ -818,22 +860,32 @@ fn generate_header_footer_content(
 
             // Position title 50pt from top of page (PDF coordinates: bottom-left origin)
             let title_y = page_height - 50.0;
-            let title_width = estimate_text_width(&expanded_title, options.title_font_size);
+            let title_width = estimate_text_width(&expanded_title, header_font_size);
             let title_x = (page_width - title_width) / 2.0; // Center
+
+            // Set header color (RGB)
+            let header_color = options.header_color_pdf();
+            content.push_str(&format!("{} rg\n", header_color)); // Fill color
+            content.push_str(&format!("{} RG\n", header_color)); // Stroke color
 
             content.push_str("BT\n");
             content.push_str("0 Tr\n"); // Fill text
-            content.push_str(&format!("/F1 {} Tf\n", options.title_font_size));
+            content.push_str(&format!("/F1 {} Tf\n", header_font_size));
             content.push_str(&format!("1 0 0 1 {} {} Tm\n", title_x, title_y));
             content.push_str(&format!("({}) Tj\n", escape_pdf_string(&expanded_title)));
             content.push_str("ET\n");
         }
     }
 
+    // Set footer color (RGB)
+    let footer_color = options.footer_color_pdf();
+    content.push_str(&format!("{} rg\n", footer_color)); // Fill color
+    content.push_str(&format!("{} RG\n", footer_color)); // Stroke color
+
     // Add footers
     // We position footer lines starting from the bottom of the page, with the
     // first line at the top of the footer area and subsequent lines below it.
-    let line_height = options.footer_font_size * 1.2;
+    let line_height = footer_font_size * 1.2;
 
     // Footer left
     if let Some(ref left_text) = options.footer_left {
@@ -847,7 +899,7 @@ fn generate_header_footer_content(
             // First line at top, subsequent lines below (Y decreases)
             let y = footer_top - (i as f32 * line_height);
             // Use font tag rendering for styled text
-            content.push_str(&generate_line_with_font_tags(line, 50.0, y, options.footer_font_size));
+            content.push_str(&generate_line_with_font_tags(line, 50.0, y, footer_font_size));
         }
     }
 
@@ -861,10 +913,10 @@ fn generate_header_footer_content(
         for (i, line) in lines.iter().enumerate() {
             let y = footer_top - (i as f32 * line_height);
             // Use width calculation that excludes font tags
-            let text_width = estimate_text_width_with_tags(line, options.footer_font_size);
+            let text_width = estimate_text_width_with_tags(line, footer_font_size);
             let x = (page_width - text_width) / 2.0;
             // Use font tag rendering for styled text
-            content.push_str(&generate_line_with_font_tags(line, x, y, options.footer_font_size));
+            content.push_str(&generate_line_with_font_tags(line, x, y, footer_font_size));
         }
     }
 
@@ -878,10 +930,10 @@ fn generate_header_footer_content(
         for (i, line) in lines.iter().enumerate() {
             let y = footer_top - (i as f32 * line_height);
             // Use width calculation that excludes font tags
-            let text_width = estimate_text_width_with_tags(line, options.footer_font_size);
+            let text_width = estimate_text_width_with_tags(line, footer_font_size);
             let x = page_width - 50.0 - text_width; // Right-aligned with margin
             // Use font tag rendering for styled text
-            content.push_str(&generate_line_with_font_tags(line, x, y, options.footer_font_size));
+            content.push_str(&generate_line_with_font_tags(line, x, y, footer_font_size));
         }
     }
 
@@ -915,6 +967,113 @@ fn expand_placeholders(text: &str, page_num: usize, total_pages: usize, date: Op
     }
 
     result
+}
+
+/// Parsed font specification from CLI-style string
+///
+/// Format: `[weight] [style] [size] [family] [color]`
+/// Examples:
+/// - `14pt` (size only)
+/// - `bold 14pt` (weight and size)
+/// - `italic 12pt Liberation_Serif` (style, size, family)
+/// - `bold italic 16pt Times_New_Roman #333333` (all components)
+///
+/// All components are optional. Underscores in family names are converted to spaces.
+#[derive(Debug, Clone)]
+pub struct FontSpec {
+    /// Font weight (normal or bold)
+    pub bold: bool,
+    /// Font style (normal or italic)
+    pub italic: bool,
+    /// Font size in points (None = use default)
+    pub size: Option<f32>,
+    /// Font family name (None = use default)
+    pub family: Option<String>,
+    /// Text color as RGB tuple (0.0-1.0 for each component)
+    pub color: Option<(f32, f32, f32)>,
+}
+
+impl Default for FontSpec {
+    fn default() -> Self {
+        Self {
+            bold: false,
+            italic: false,
+            size: None,
+            family: None,
+            color: None,
+        }
+    }
+}
+
+impl FontSpec {
+    /// Parse a font specification string
+    ///
+    /// Format: `[bold] [italic] [size[pt]] [family_name] [#rrggbb]`
+    ///
+    /// Examples:
+    /// - `"14pt"` -> size 14
+    /// - `"bold 14pt"` -> bold, size 14
+    /// - `"italic 12pt Liberation_Serif"` -> italic, size 12, Liberation Serif
+    /// - `"bold italic 16pt #ff0000"` -> bold italic, size 16, red color
+    pub fn parse(spec: &str) -> Self {
+        let mut result = Self::default();
+        let tokens: Vec<&str> = spec.split_whitespace().collect();
+
+        for token in tokens {
+            let lower = token.to_lowercase();
+
+            if lower == "bold" {
+                result.bold = true;
+            } else if lower == "italic" {
+                result.italic = true;
+            } else if lower.starts_with('#') && (token.len() == 7 || token.len() == 4) {
+                // Hex color
+                result.color = parse_hex_color(token);
+            } else if let Some(size) = parse_size_token(&lower) {
+                result.size = Some(size);
+            } else if !lower.is_empty() {
+                // Assume it's a font family name (convert underscores to spaces)
+                result.family = Some(token.replace('_', " "));
+            }
+        }
+
+        result
+    }
+
+    /// Create a FontSpec with just a size
+    pub fn with_size(size: f32) -> Self {
+        Self {
+            size: Some(size),
+            ..Default::default()
+        }
+    }
+}
+
+/// Parse a size token like "14pt", "14", "14.5pt"
+fn parse_size_token(token: &str) -> Option<f32> {
+    let cleaned = token.trim_end_matches("pt");
+    cleaned.parse::<f32>().ok()
+}
+
+/// Parse a hex color like "#ff0000" or "#f00" to RGB tuple (0.0-1.0)
+fn parse_hex_color(hex: &str) -> Option<(f32, f32, f32)> {
+    let hex = hex.trim_start_matches('#');
+
+    if hex.len() == 6 {
+        // Full hex: #rrggbb
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some((r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0))
+    } else if hex.len() == 3 {
+        // Short hex: #rgb -> #rrggbb
+        let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
+        let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
+        let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
+        Some((r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0))
+    } else {
+        None
+    }
 }
 
 /// Font style for inline text formatting
@@ -1321,4 +1480,136 @@ fn append_content_to_page(doc: &mut Document, page_id: ObjectId, new_content_id:
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_font_spec_parse_size_only() {
+        let spec = FontSpec::parse("14pt");
+        assert!(!spec.bold);
+        assert!(!spec.italic);
+        assert_eq!(spec.size, Some(14.0));
+        assert!(spec.family.is_none());
+        assert!(spec.color.is_none());
+    }
+
+    #[test]
+    fn test_font_spec_parse_size_no_unit() {
+        let spec = FontSpec::parse("12");
+        assert_eq!(spec.size, Some(12.0));
+    }
+
+    #[test]
+    fn test_font_spec_parse_bold() {
+        let spec = FontSpec::parse("bold 16pt");
+        assert!(spec.bold);
+        assert!(!spec.italic);
+        assert_eq!(spec.size, Some(16.0));
+    }
+
+    #[test]
+    fn test_font_spec_parse_italic() {
+        let spec = FontSpec::parse("italic 14pt");
+        assert!(!spec.bold);
+        assert!(spec.italic);
+        assert_eq!(spec.size, Some(14.0));
+    }
+
+    #[test]
+    fn test_font_spec_parse_bold_italic() {
+        let spec = FontSpec::parse("bold italic 18pt");
+        assert!(spec.bold);
+        assert!(spec.italic);
+        assert_eq!(spec.size, Some(18.0));
+    }
+
+    #[test]
+    fn test_font_spec_parse_family_with_underscores() {
+        let spec = FontSpec::parse("14pt Liberation_Serif");
+        assert_eq!(spec.size, Some(14.0));
+        assert_eq!(spec.family, Some("Liberation Serif".to_string()));
+    }
+
+    #[test]
+    fn test_font_spec_parse_hex_color_full() {
+        let spec = FontSpec::parse("14pt #ff0000");
+        assert_eq!(spec.size, Some(14.0));
+        let color = spec.color.unwrap();
+        assert!((color.0 - 1.0).abs() < 0.01); // Red
+        assert!(color.1.abs() < 0.01); // Green
+        assert!(color.2.abs() < 0.01); // Blue
+    }
+
+    #[test]
+    fn test_font_spec_parse_hex_color_short() {
+        let spec = FontSpec::parse("14pt #f00");
+        let color = spec.color.unwrap();
+        assert!((color.0 - 1.0).abs() < 0.01); // Red
+        assert!(color.1.abs() < 0.01); // Green
+        assert!(color.2.abs() < 0.01); // Blue
+    }
+
+    #[test]
+    fn test_font_spec_parse_hex_color_gray() {
+        let spec = FontSpec::parse("#333333");
+        let color = spec.color.unwrap();
+        let expected = 0x33 as f32 / 255.0;
+        assert!((color.0 - expected).abs() < 0.01);
+        assert!((color.1 - expected).abs() < 0.01);
+        assert!((color.2 - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_font_spec_parse_full_spec() {
+        let spec = FontSpec::parse("bold italic 24pt Times_New_Roman #0000ff");
+        assert!(spec.bold);
+        assert!(spec.italic);
+        assert_eq!(spec.size, Some(24.0));
+        assert_eq!(spec.family, Some("Times New Roman".to_string()));
+        let color = spec.color.unwrap();
+        assert!(color.0.abs() < 0.01); // Red
+        assert!(color.1.abs() < 0.01); // Green
+        assert!((color.2 - 1.0).abs() < 0.01); // Blue
+    }
+
+    #[test]
+    fn test_font_spec_parse_empty() {
+        let spec = FontSpec::parse("");
+        assert!(!spec.bold);
+        assert!(!spec.italic);
+        assert!(spec.size.is_none());
+        assert!(spec.family.is_none());
+        assert!(spec.color.is_none());
+    }
+
+    #[test]
+    fn test_font_spec_case_insensitive() {
+        let spec = FontSpec::parse("BOLD ITALIC 14PT");
+        assert!(spec.bold);
+        assert!(spec.italic);
+        assert_eq!(spec.size, Some(14.0));
+    }
+
+    #[test]
+    fn test_parse_hex_color() {
+        // Full hex
+        let color = parse_hex_color("#ff8800").unwrap();
+        assert!((color.0 - 1.0).abs() < 0.01);
+        assert!((color.1 - 0.533).abs() < 0.01);
+        assert!(color.2.abs() < 0.01);
+
+        // Short hex
+        let color = parse_hex_color("#f80").unwrap();
+        assert!((color.0 - 1.0).abs() < 0.01);
+        assert!((color.1 - 0.533).abs() < 0.01);
+        assert!(color.2.abs() < 0.01);
+
+        // Invalid lengths
+        assert!(parse_hex_color("#12345").is_none()); // Wrong length
+        assert!(parse_hex_color("#1234567").is_none()); // Too long
+        assert!(parse_hex_color("#12").is_none()); // Too short
+    }
 }

@@ -1,6 +1,6 @@
 //! Demo of direct header/footer writing (new approach)
 
-use pdf_handouts::pdf::{merge_pdfs, add_headers_footers, MergeOptions, HeaderFooterOptions};
+use pdf_handouts::pdf::{merge_pdfs, add_headers_footers, MergeOptions, HeaderFooterOptions, FontSpec};
 use chrono::NaiveDate;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +61,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // - | or [br] = line break
     // - [font italic]...[/font] = italic text
     // - [font bold]...[/font] = bold text
+    //
+    // FontSpec allows specifying: bold, italic, size, family, and color
+    // Format: "[bold] [italic] [size[pt]] [family_name] [#rrggbb]"
+    // Example: "bold 24pt Liberation_Serif #333333"
     let header_footer_options = HeaderFooterOptions {
         title: Some("Bridge Class Handout".to_string()),
         footer_left: Some("Stoneridge Creek|[font italic]Community Center[/font]".to_string()),
@@ -71,6 +75,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         show_total_page_count: false, // Using [pages] placeholder instead
         title_font_size: 24.0,
         footer_font_size: 14.0,
+        // Use FontSpec to set header color to dark gray
+        header_font: Some(FontSpec::parse("24pt #333333")),
+        // Use FontSpec to set footer color to a slightly lighter gray
+        footer_font: Some(FontSpec::parse("14pt #555555")),
     };
 
     add_headers_footers(merged_path, final_output_path, &header_footer_options)?;

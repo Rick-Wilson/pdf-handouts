@@ -1,206 +1,239 @@
 # PDF Handouts
 
-A cross-platform Rust library and CLI tool for merging PDFs and adding custom headers and footers.
+A cross-platform command-line tool for merging PDFs and adding custom headers and footers.
 
-This project ports the functionality from Windows PowerShell scripts (PackageSCHandouts.ps1, Package Handouts.ps1) to pure Rust, eliminating dependencies on PDFtk and wkhtmltopdf.
-
-## Project Status
-
-**Current Phase**: Sprint 1 - Foundation ✅ | Sprint 2 - Date & Layout (In Progress)
-
-- [x] Project initialization with Cargo
-- [x] Dependencies configured (lopdf, krilla, clap, chrono)
-- [x] Basic module structure created
-- [x] Error types implemented with thiserror
-- [x] Layout types and tests working
-- [x] PDF merging implementation ✅
-- [x] Metadata extraction (page counting) ✅
-- [x] Integration tests with real-world PDFs ✅
-- [x] Date parsing module ✅
-- [ ] Complete layout calculations (in progress)
-- [ ] Header/footer PDF generation with krilla
-- [ ] CLI tool with clap
-
-## Architecture
-
-```
-pdf-handouts/
-├── src/
-│   ├── lib.rs              # Library entry point ✅
-│   ├── error.rs            # Error types ✅
-│   ├── pdf/
-│   │   ├── mod.rs          # PDF module ✅
-│   │   ├── merge.rs        # PDF merging ✅
-│   │   ├── metadata.rs     # Metadata extraction ✅
-│   │   └── create.rs       # Header/footer generation (TODO)
-│   ├── date.rs             # Date parsing ✅
-│   ├── layout.rs           # Layout calculations ✅
-│   └── bin/
-│       └── pdf-handouts.rs # CLI tool (placeholder)
-├── scripts/                # Wrapper scripts (TODO)
-├── tests/                  # Integration tests ✅
-└── examples/               # Usage examples ✅
-```
-
-## Technology Stack
-
-- **PDF Merging**: [lopdf](https://github.com/J-F-Liu/lopdf) 0.34 - Low-level PDF operations
-- **PDF Creation**: [krilla](https://github.com/LaurenzV/krilla) 0.3 - Modern PDF generation with excellent testing
-- **CLI**: [clap](https://github.com/clap-rs/clap) 4.5 - Command-line argument parsing
-- **Date Handling**: [chrono](https://github.com/chronotope/chrono) 0.4 - Date/time library
-- **Error Handling**: [thiserror](https://github.com/dtolnay/thiserror) 1.0 - Derive Error trait
-
-## Building
+## Installation
 
 ```bash
-# Check the project compiles
-cargo check
-
-# Build the project
-cargo build
-
-# Build with optimizations
+# Build from source
 cargo build --release
 
-# Run tests
-cargo test
+# The binary will be at target/release/pdf-handouts
 ```
 
-## Current Capabilities
+## Quick Start
 
-### PDF Merging ✅
-
-```rust
-use pdf_handouts::pdf::{MergeOptions, merge_pdfs};
-use std::path::PathBuf;
-
-let options = MergeOptions {
-    input_paths: vec![
-        PathBuf::from("1. first.pdf"),
-        PathBuf::from("2. second.pdf"),
-    ],
-    output_path: PathBuf::from("merged.pdf"),
-};
-
-merge_pdfs(&options)?;
+```bash
+# Merge multiple PDFs and add headers/footers in one step
+pdf-handouts build \
+  "1. intro.pdf" "2. main.pdf" "3. appendix.pdf" \
+  -o handout.pdf \
+  --title "Workshop Handout" \
+  --footer-left "Acme Corp" \
+  --footer-right "Page [page] of [pages]" \
+  --date today
 ```
 
-### Metadata Extraction ✅
+## Commands
 
-```rust
-use pdf_handouts::pdf::{count_pages, extract_metadata};
-use std::path::Path;
+### `build` - Merge and add headers/footers
 
-// Count pages
-let count = count_pages(Path::new("document.pdf"))?;
+The most common workflow: merge multiple PDFs and add headers/footers in one step.
 
-// Extract full metadata
-let metadata = extract_metadata(Path::new("document.pdf"))?;
-println!("Pages: {}", metadata.page_count);
-println!("Title: {:?}", metadata.title);
-println!("Author: {:?}", metadata.author);
+```bash
+pdf-handouts build [OPTIONS] --output <OUTPUT> <INPUTS>...
 ```
 
-### Date Parsing ✅
+**Arguments:**
+- `<INPUTS>...` - Input PDF files in order
 
-```rust
-use pdf_handouts::date::{parse_date_expression, resolve_date, format_date};
+**Options:**
+- `-o, --output <OUTPUT>` - Output PDF file path (required)
+- `--title <TITLE>` - Title text (centered at top of first page)
+- `--footer-left <TEXT>` - Footer left section
+- `--footer-center <TEXT>` - Footer center section
+- `--footer-right <TEXT>` - Footer right section
+- `--date <DATE>` - Date for `[date]` placeholder
+- `--font <SPEC>` - Font specification for both header and footer
+- `--header-font <SPEC>` - Font specification for header only
+- `--footer-font <SPEC>` - Font specification for footer only
 
-// Parse flexible date expressions
-let expr = parse_date_expression("Tuesday")?;
-let date = resolve_date(&expr).unwrap();
-let formatted = format_date(&date);
-// Output: "January 13, 2026"
-
-// Supported formats:
-// - "" (empty) → None
-// - "today" → Current date
-// - "2024-11-20" → ISO format
-// - "11/20/2024" → US format
-// - "Tuesday" → Next Tuesday (or today if today is Tuesday)
-// - "Tuesday+3" → 4th upcoming Tuesday (next + 3 weeks)
+**Example:**
+```bash
+pdf-handouts build \
+  "lesson1.pdf" "lesson2.pdf" "exercises.pdf" \
+  -o "complete-handout.pdf" \
+  --title "Bridge Class Handout" \
+  --footer-left "Stoneridge Creek|[font italic]Community Center[/font]" \
+  --footer-center "Presented by:|Rick Wilson" \
+  --footer-right "Page [page] of [pages]|[date]" \
+  --date "next tuesday" \
+  --font "14pt #333333" \
+  --header-font "24pt #222222"
 ```
 
-### Layout Module ✅
+### `merge` - Merge PDFs only
 
-```rust
-use pdf_handouts::layout::*;
+Merge multiple PDFs into one without adding headers/footers.
 
-// Create page dimensions
-let letter = PageDimensions::letter();  // US Letter (8.5" × 11")
-let a4 = PageDimensions::a4();          // A4 (210mm × 297mm)
-
-// Work with lengths
-let margin = Length::from_mm(25.4);  // 1 inch
-assert_eq!(margin.pt(), 72.0);       // 72 points
-
-// Create margins
-let margins = Margins::uniform(Length::from_mm(12.7));
+```bash
+pdf-handouts merge [OPTIONS] --output <OUTPUT> <INPUTS>...
 ```
 
-### Error Handling ✅
-
-```rust
-use pdf_handouts::error::{Error, Result};
-
-// All operations return Result<T, Error>
-fn example() -> Result<()> {
-    // Errors are automatically converted from:
-    // - lopdf::Error
-    // - std::io::Error
-    // Custom errors for domain-specific issues
-    Ok(())
-}
+**Example:**
+```bash
+pdf-handouts merge file1.pdf file2.pdf file3.pdf -o merged.pdf
 ```
 
-## Planned Features
+### `headers` - Add headers/footers to existing PDF
 
-See [ORIGINAL_DESIGN_PDF_HANDOUTS.md](ORIGINAL_DESIGN_PDF_HANDOUTS.md) for the original PowerShell implementation details.
+Add headers and footers to an already-merged PDF.
 
-### Phase 1: Core Library ✅
-- [x] Project setup
-- [x] PDF merging with lopdf
-- [x] Page counting and metadata extraction
-- [x] Flexible date expression parsing
+```bash
+pdf-handouts headers [OPTIONS] --output <OUTPUT> <INPUT>
+```
 
-### Phase 2: Header/Footer Generation
-- [ ] Watermark PDF creation with krilla
-- [ ] Three-column footer layout (25% / 50% / 25%)
-- [ ] Title on first page
-- [ ] Page numbering with optional total count
-- [ ] Date formatting
+**Example:**
+```bash
+pdf-handouts headers merged.pdf -o final.pdf \
+  --title "My Document" \
+  --footer-right "Page [page]"
+```
 
-### Phase 3: CLI Tool
-- [ ] Command-line interface with clap
-- [ ] Glob pattern support for input files
-- [ ] All PowerShell script parameters supported
-- [ ] Bash and PowerShell wrapper scripts for Stoneridge Creek defaults
+### `info` - Show PDF information
 
-### Future Enhancements
-- Content scaling to avoid header/footer overlap
-- Image file input support (JPG, PNG, TIFF)
-- Configuration file support
-- GUI for iPad app integration
+Display page count and metadata for a PDF file.
 
-## Original Design Reference
+```bash
+pdf-handouts info <INPUT>
+```
 
-This project replaces three PowerShell scripts:
+**Example:**
+```bash
+pdf-handouts info document.pdf
+# Output:
+# File: document.pdf
+# Pages: 14
+# Title: My Document
+# Author: John Doe
+```
 
-1. **PackageSCHandouts.ps1** - Wrapper with Stoneridge Creek defaults
-2. **Package Handouts.ps1** - Main orchestrator
-3. **Handouts Template Generator.ps1** - Watermark generator
+## Text Formatting
 
-The original implementation used:
-- PDFtk for merging and stamping
-- wkhtmltopdf for HTML→PDF conversion
-- Windows-specific paths and tools
+### Placeholders
 
-Our Rust implementation eliminates all external dependencies and works cross-platform.
+Use these placeholders in footer text - they're replaced with actual values:
+
+| Placeholder | Description |
+|-------------|-------------|
+| `[page]` | Current page number |
+| `[pages]` | Total page count |
+| `[date]` | Formatted date (requires `--date`) |
+
+**Example:**
+```bash
+--footer-right "Page [page] of [pages]|[date]"
+# Output: "Page 3 of 14" and "January 14, 2026"
+```
+
+### Line Breaks
+
+Use `|` or `[br]` to create multi-line footers:
+
+```bash
+--footer-left "Acme Corp|Engineering Division"
+# Creates:
+#   Acme Corp
+#   Engineering Division
+```
+
+### Inline Font Styling
+
+Use `[font]...[/font]` tags for inline styling:
+
+| Tag | Effect |
+|-----|--------|
+| `[font italic]...[/font]` | Italic text |
+| `[font bold]...[/font]` | Bold text |
+| `[font bold italic]...[/font]` | Bold italic text |
+
+**Example:**
+```bash
+--footer-left "Company Name|[font italic]Department[/font]"
+```
+
+## Font Specification
+
+The `--font`, `--header-font`, and `--footer-font` options accept a font specification string:
+
+```
+[bold] [italic] [size[pt]] [family_name] [#rrggbb]
+```
+
+All components are optional. Order doesn't matter.
+
+| Component | Description | Example |
+|-----------|-------------|---------|
+| `bold` | Bold weight | `bold` |
+| `italic` | Italic style | `italic` |
+| `size` | Font size in points | `14pt` or `14` |
+| `family` | Font family (use underscores for spaces) | `Liberation_Serif` |
+| `#rrggbb` | Hex color | `#333333` or `#f00` |
+
+**Examples:**
+```bash
+--font "14pt"                           # 14pt default font
+--font "bold 16pt"                      # Bold 16pt
+--font "italic 12pt Liberation_Serif"   # Italic 12pt Liberation Serif
+--font "24pt #333333"                   # 24pt dark gray
+--font "bold italic 18pt #0000ff"       # Bold italic 18pt blue
+```
+
+### Font Hierarchy
+
+- `--font` sets the base font for both header and footer
+- `--header-font` overrides `--font` for the header only
+- `--footer-font` overrides `--font` for the footer only
+
+```bash
+pdf-handouts build input.pdf -o output.pdf \
+  --font "14pt #333333" \           # Base: 14pt dark gray
+  --header-font "24pt #000000"      # Header: 24pt black (overrides base)
+```
+
+## Date Expressions
+
+The `--date` option accepts flexible date expressions:
+
+| Expression | Description |
+|------------|-------------|
+| `today` | Current date |
+| `2026-01-14` | ISO format date |
+| `01/14/2026` | US format date |
+| `Tuesday` | Next Tuesday (or today if Tuesday) |
+| `Tuesday+1` | Tuesday after next |
+| `Tuesday+3` | 4th upcoming Tuesday |
+
+**Example:**
+```bash
+--date "next tuesday"    # Next occurrence of Tuesday
+--date "2026-01-14"      # Specific date
+--date "today"           # Current date
+```
+
+## Complete Example
+
+```bash
+# Create a workshop handout from multiple source PDFs
+pdf-handouts build \
+  "1. NT Ladder - Google Docs.pdf" \
+  "2. NT Ladder Practice Sheet.pdf" \
+  "3. ABS4-2 Jacoby Transfers Handouts.pdf" \
+  "4. thinking-bridge-Responding to 1NT 1-6.pdf" \
+  -o "Bridge-Workshop-Handout.pdf" \
+  --title "Bridge Class Handout" \
+  --footer-left "Stoneridge Creek|[font italic]Community Center[/font]" \
+  --footer-center "Presented by:|Rick Wilson" \
+  --footer-right "Page [page] of [pages]|[date]" \
+  --date "next tuesday" \
+  --header-font "24pt #333333" \
+  --footer-font "14pt #555555"
+```
+
+## Library Usage
+
+This tool is also available as a Rust library. See [LIBRARY.md](LIBRARY.md) for API documentation.
 
 ## License
 
 MIT OR Apache-2.0
-
-## Author
-
-Rick Wilson

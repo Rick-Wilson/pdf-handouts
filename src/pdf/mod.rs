@@ -9,4 +9,4 @@ pub mod headers;
 pub use merge::{merge_pdfs, overlay_watermark, MergeOptions};
 pub use metadata::{count_pages, extract_metadata, PdfMetadata};
 pub use create::{create_watermark_pdf, WatermarkOptions};
-pub use headers::{add_headers_footers, HeaderFooterOptions};
+pub use headers::{add_headers_footers, HeaderFooterOptions, FontSpec};
