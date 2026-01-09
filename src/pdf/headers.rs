@@ -813,16 +813,19 @@ fn generate_header_footer_content(
     // Add title on first page
     if is_first_page {
         if let Some(ref title) = options.title {
+            // Expand placeholders in title
+            let expanded_title = expand_placeholders(title, page_num, total_pages, options.date.as_ref());
+
             // Position title 50pt from top of page (PDF coordinates: bottom-left origin)
             let title_y = page_height - 50.0;
-            let title_width = estimate_text_width(title, options.title_font_size);
+            let title_width = estimate_text_width(&expanded_title, options.title_font_size);
             let title_x = (page_width - title_width) / 2.0; // Center
 
             content.push_str("BT\n");
             content.push_str("0 Tr\n"); // Fill text
             content.push_str(&format!("/F1 {} Tf\n", options.title_font_size));
             content.push_str(&format!("1 0 0 1 {} {} Tm\n", title_x, title_y));
-            content.push_str(&format!("({}) Tj\n", escape_pdf_string(title)));
+            content.push_str(&format!("({}) Tj\n", escape_pdf_string(&expanded_title)));
             content.push_str("ET\n");
         }
     }
@@ -834,7 +837,9 @@ fn generate_header_footer_content(
 
     // Footer left
     if let Some(ref left_text) = options.footer_left {
-        let lines = parse_multiline_text(left_text);
+        // Expand placeholders first, then parse lines
+        let expanded = expand_placeholders(left_text, page_num, total_pages, options.date.as_ref());
+        let lines = parse_multiline_text(&expanded);
         let num_lines = lines.len();
         // Calculate top of footer area: start high enough to fit all lines above the margin
         let footer_top = 30.0 + ((num_lines - 1) as f32 * line_height);
@@ -851,7 +856,9 @@ fn generate_header_footer_content(
 
     // Footer center
     if let Some(ref center_text) = options.footer_center {
-        let lines = parse_multiline_text(center_text);
+        // Expand placeholders first, then parse lines
+        let expanded = expand_placeholders(center_text, page_num, total_pages, options.date.as_ref());
+        let lines = parse_multiline_text(&expanded);
         let num_lines = lines.len();
         let footer_top = 30.0 + ((num_lines - 1) as f32 * line_height);
         for (i, line) in lines.iter().enumerate() {
@@ -867,41 +874,56 @@ fn generate_header_footer_content(
         }
     }
 
-    // Footer right (page numbers and date)
-    let mut right_parts = Vec::new();
-
+    // Footer right - now uses placeholder-based content like other footers
     if let Some(ref right_text) = options.footer_right {
-        right_parts.push(right_text.clone());
-    }
+        // Expand placeholders first, then parse lines
+        let expanded = expand_placeholders(right_text, page_num, total_pages, options.date.as_ref());
+        let lines = parse_multiline_text(&expanded);
+        let num_lines = lines.len();
+        let footer_top = 30.0 + ((num_lines.saturating_sub(1)) as f32 * line_height);
+        for (i, line) in lines.iter().enumerate() {
+            let y = footer_top - (i as f32 * line_height);
+            let text_width = estimate_text_width(line, options.footer_font_size);
+            let x = page_width - 50.0 - text_width; // Right-aligned with margin
 
-    if options.show_page_numbers {
-        let page_text = if options.show_total_page_count {
-            format!("Page {} of {}", page_num, total_pages)
-        } else {
-            format!("Page {}", page_num)
-        };
-        right_parts.push(page_text);
-    }
-
-    if let Some(ref date) = options.date {
-        right_parts.push(format_date(date));
-    }
-
-    let num_lines = right_parts.len();
-    let footer_top = 30.0 + ((num_lines.saturating_sub(1)) as f32 * line_height);
-    for (i, line) in right_parts.iter().enumerate() {
-        let y = footer_top - (i as f32 * line_height);
-        let text_width = estimate_text_width(line, options.footer_font_size);
-        let x = page_width - 50.0 - text_width; // Right-aligned with margin
-
-        content.push_str("BT\n");
-        content.push_str(&format!("/F1 {} Tf\n", options.footer_font_size));
-        content.push_str(&format!("1 0 0 1 {} {} Tm\n", x, y));
-        content.push_str(&format!("({}) Tj\n", escape_pdf_string(line)));
-        content.push_str("ET\n");
+            content.push_str("BT\n");
+            content.push_str(&format!("/F1 {} Tf\n", options.footer_font_size));
+            content.push_str(&format!("1 0 0 1 {} {} Tm\n", x, y));
+            content.push_str(&format!("({}) Tj\n", escape_pdf_string(line)));
+            content.push_str("ET\n");
+        }
     }
 
     content
+}
+
+/// Expand placeholders in text
+///
+/// Supported placeholders:
+/// - `[page]` - current page number
+/// - `[pages]` - total page count
+/// - `[date]` - formatted date (if provided)
+fn expand_placeholders(text: &str, page_num: usize, total_pages: usize, date: Option<&NaiveDate>) -> String {
+    let mut result = text.to_string();
+
+    // Replace page placeholders (case-insensitive)
+    result = result.replace("[page]", &page_num.to_string());
+    result = result.replace("[PAGE]", &page_num.to_string());
+    result = result.replace("[pages]", &total_pages.to_string());
+    result = result.replace("[PAGES]", &total_pages.to_string());
+
+    // Replace date placeholder
+    if let Some(d) = date {
+        let formatted = format_date(d);
+        result = result.replace("[date]", &formatted);
+        result = result.replace("[DATE]", &formatted);
+    } else {
+        // Remove date placeholder if no date provided
+        result = result.replace("[date]", "");
+        result = result.replace("[DATE]", "");
+    }
+
+    result
 }
 
 /// Parse text with line break markers
