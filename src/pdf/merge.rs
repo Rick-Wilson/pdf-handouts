@@ -377,6 +377,67 @@ fn merge_resources(page_dict: &mut Dictionary, watermark_resources: &Object) -> 
     Ok(())
 }
 
+/// Wrap page content streams in q/Q to isolate transformations
+///
+/// This ensures that any transformation matrices in the original content
+/// don't affect content streams we add later (like headers/footers).
+fn wrap_page_content_in_graphics_state(doc: &mut Document, page_id: ObjectId) -> Result<()> {
+    // First, get the content references (immutable borrow)
+    let content_refs: Vec<ObjectId> = {
+        let page_obj = doc.get_object(page_id)?;
+        if let Object::Dictionary(page_dict) = page_obj {
+            if let Ok(contents) = page_dict.get(b"Contents") {
+                match contents {
+                    Object::Reference(id) => vec![*id],
+                    Object::Array(arr) => {
+                        arr.iter()
+                            .filter_map(|obj| {
+                                if let Object::Reference(id) = obj {
+                                    Some(*id)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    }
+                    _ => return Ok(()),
+                }
+            } else {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+    };
+
+    // Read all content streams and concatenate them
+    let mut combined_content = String::from("q\n"); // Save graphics state
+
+    for content_id in content_refs {
+        if let Ok(Object::Stream(stream)) = doc.get_object(content_id) {
+            let content_str = String::from_utf8_lossy(&stream.content);
+            combined_content.push_str(&content_str);
+            combined_content.push('\n');
+        }
+    }
+
+    combined_content.push_str("Q\n"); // Restore graphics state
+
+    // Create a new single content stream with wrapped content
+    let wrapped_stream_id = doc.add_object(lopdf::Stream::new(
+        Dictionary::new(),
+        combined_content.into_bytes(),
+    ));
+
+    // Replace the Contents with single wrapped stream (mutable borrow)
+    let page_obj = doc.get_object_mut(page_id)?;
+    if let Object::Dictionary(ref mut page_dict) = page_obj {
+        page_dict.set("Contents", Object::Reference(wrapped_stream_id));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
