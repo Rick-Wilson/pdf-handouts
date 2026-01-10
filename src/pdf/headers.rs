@@ -956,12 +956,10 @@ fn create_form_xobject(
     xobject_dict.set("Resources", Object::Dictionary(resources));
 
     // Create the stream with the content
-    let xobject_stream = Stream {
-        dict: xobject_dict,
-        content: content.into_bytes(),
-        allows_compression: true,
-        start_position: None,
-    };
+    // Note: Must use Stream::new() which automatically sets the Length entry in the
+    // stream dictionary. The struct constructor doesn't set Length, causing the
+    // stream content to be lost when saving the PDF.
+    let xobject_stream = Stream::new(xobject_dict, content.into_bytes());
 
     let xobject_id = doc.add_object(Object::Stream(xobject_stream));
     Ok(xobject_id)
