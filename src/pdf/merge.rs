@@ -72,8 +72,14 @@ pub fn merge_pdfs(options: &MergeOptions) -> Result<()> {
         // Update max_id for next document
         max_id = doc.max_id + 1;
 
-        // Collect page IDs from this document
+        // Before collecting pages, ensure each page has its own Resources
+        // (copy inherited Resources from parent if needed)
         let pages = doc.get_pages();
+        for (_page_num, page_id) in &pages {
+            copy_inherited_resources_to_page(&mut doc, *page_id);
+        }
+
+        // Collect page IDs from this document
         page_ids.extend(pages.into_iter().map(|(_, id)| id));
 
         // Collect all objects from this document
@@ -375,6 +381,78 @@ fn merge_resources(page_dict: &mut Dictionary, watermark_resources: &Object) -> 
     page_dict.set("Resources", merged_resources);
 
     Ok(())
+}
+
+/// Copy inherited Resources from page tree parent to page directly
+///
+/// This ensures pages are self-contained and don't lose their Resources
+/// when re-parented during merge operations.
+fn copy_inherited_resources_to_page(doc: &mut Document, page_id: ObjectId) {
+    // First, check if page already has Resources
+    let has_resources = {
+        if let Ok(Object::Dictionary(page_dict)) = doc.get_object(page_id) {
+            page_dict.get(b"Resources").is_ok()
+        } else {
+            false
+        }
+    };
+
+    if has_resources {
+        return; // Page already has its own Resources
+    }
+
+    // Get inherited Resources from parent
+    let inherited_resources = {
+        if let Ok(Object::Dictionary(page_dict)) = doc.get_object(page_id) {
+            if let Ok(parent) = page_dict.get(b"Parent") {
+                if let Object::Reference(parent_id) = parent {
+                    get_inherited_resources_from_tree(doc, *parent_id)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // Set the inherited Resources on the page
+    if let Some(resources) = inherited_resources {
+        if let Ok(page_obj) = doc.get_object_mut(page_id) {
+            if let Object::Dictionary(ref mut page_dict) = page_obj {
+                page_dict.set("Resources", Object::Dictionary(resources));
+            }
+        }
+    }
+}
+
+/// Recursively get Resources from page tree ancestors
+fn get_inherited_resources_from_tree(doc: &Document, node_id: ObjectId) -> Option<Dictionary> {
+    if let Ok(Object::Dictionary(node_dict)) = doc.get_object(node_id) {
+        // Check for Resources on this node
+        if let Ok(res) = node_dict.get(b"Resources") {
+            match res {
+                Object::Dictionary(dict) => return Some(dict.clone()),
+                Object::Reference(res_id) => {
+                    if let Ok(Object::Dictionary(dict)) = doc.get_object(*res_id) {
+                        return Some(dict.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Not found here, check parent
+        if let Ok(parent) = node_dict.get(b"Parent") {
+            if let Object::Reference(parent_id) = parent {
+                return get_inherited_resources_from_tree(doc, *parent_id);
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

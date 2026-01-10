@@ -967,33 +967,112 @@ fn create_form_xobject(
     Ok(xobject_id)
 }
 
+/// Count the q/Q imbalance in a content stream
+///
+/// Returns a positive number if there are more q than Q operators,
+/// meaning there are unclosed graphics states.
+fn count_graphics_state_imbalance(content: &[u8]) -> i32 {
+    let content_str = String::from_utf8_lossy(content);
+    let mut depth: i32 = 0;
+
+    // Simple tokenization - look for standalone 'q' and 'Q' operators
+    // They should be preceded by whitespace/start and followed by whitespace/end
+    let bytes = content_str.as_bytes();
+    let len = bytes.len();
+
+    for i in 0..len {
+        let c = bytes[i];
+
+        // Check for 'q' or 'Q'
+        if c == b'q' || c == b'Q' {
+            // Check it's not part of a larger token (like /Fq or BQ)
+            let prev_ok = i == 0 || !bytes[i-1].is_ascii_alphanumeric();
+            let next_ok = i + 1 >= len || !bytes[i+1].is_ascii_alphanumeric();
+
+            if prev_ok && next_ok {
+                if c == b'q' {
+                    depth += 1;
+                } else {
+                    depth -= 1;
+                }
+            }
+        }
+    }
+
+    depth
+}
+
 /// Wrap page content in q/Q and append XObject invocation
 ///
 /// This is the key to making headers/footers work with any PDF:
 /// 1. Prepend "q\n" to save graphics state before original content
-/// 2. Append "Q\n" after original content to restore state
-/// 3. Append XObject invocation in clean coordinate space
+/// 2. Append enough Q operators to close all unclosed states in original content
+/// 3. Append one more Q to close our initial q
+/// 4. Append XObject invocation in clean coordinate space
 ///
 /// The structure becomes:
 /// ```text
 /// Stream 1: q
 /// Stream 2: [original content]
-/// Stream 3: Q
+/// Stream 3: Q Q Q... (enough to balance)
 ///           q 1 0 0 1 0 0 cm /HeaderFooter Do Q
 /// ```
 fn wrap_content_and_append_xobject(doc: &mut Document, page_id: ObjectId) -> Result<()> {
+    // First, read existing content to count q/Q imbalance
+    let imbalance = {
+        let page_obj = doc.get_object(page_id)?;
+        if let Object::Dictionary(page_dict) = page_obj {
+            if let Ok(contents) = page_dict.get(b"Contents") {
+                let content_ids: Vec<ObjectId> = match contents {
+                    Object::Reference(id) => vec![*id],
+                    Object::Array(arr) => arr.iter().filter_map(|o| {
+                        if let Object::Reference(id) = o { Some(*id) } else { None }
+                    }).collect(),
+                    _ => vec![],
+                };
+
+                let mut total_imbalance: i32 = 0;
+                for content_id in content_ids {
+                    if let Ok(Object::Stream(stream)) = doc.get_object(content_id) {
+                        total_imbalance += count_graphics_state_imbalance(&stream.content);
+                    }
+                }
+                total_imbalance
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    };
+
     // Create stream for "q\n" (save graphics state)
     let q_stream_id = doc.add_object(Stream::new(
         Dictionary::new(),
         b"q\n".to_vec(),
     ));
 
-    // Create stream for "Q\n" followed by XObject invocation
-    // The Q restores graphics state, then we draw our overlay in clean coordinates
-    let qx_content = b" Q\nq\nq 1 0 0 1 0 0 cm /HeaderFooter Do Q\nQ\n".to_vec();
+    // Build the closing stream:
+    // - First, close any unclosed graphics states from original content
+    // - Then close our initial q
+    // - Then draw our XObject
+    let mut qx_content = String::new();
+
+    // Close unclosed states from original content (if any)
+    // imbalance > 0 means there are unclosed q's
+    for _ in 0..imbalance.max(0) {
+        qx_content.push_str(" Q\n");
+    }
+
+    // Close our initial q
+    qx_content.push_str(" Q\n");
+
+    // Draw our XObject in clean coordinate space
+    qx_content.push_str("q 1 0 0 1 0 0 cm /HeaderFooter Do Q\n");
+
     let qx_stream_id = doc.add_object(Stream::new(
         Dictionary::new(),
-        qx_content,
+        qx_content.into_bytes(),
     ));
 
     // Get the page and modify its Contents
@@ -1035,10 +1114,11 @@ fn wrap_content_and_append_xobject(doc: &mut Document, page_id: ObjectId) -> Res
 
 /// Add XObject reference to page's Resources dictionary
 fn add_xobject_to_page_resources(doc: &mut Document, page_id: ObjectId, xobject_id: ObjectId) -> Result<()> {
-    // First, get the resources dictionary (may need to dereference)
+    // First, get the resources dictionary (may need to dereference or inherit from parent)
     let resources_dict = {
         let page_obj = doc.get_object(page_id)?;
         if let Object::Dictionary(page_dict) = page_obj {
+            // Try to get Resources from page directly
             if let Ok(res) = page_dict.get(b"Resources") {
                 match res {
                     Object::Dictionary(dict) => dict.clone(),
@@ -1053,7 +1133,16 @@ fn add_xobject_to_page_resources(doc: &mut Document, page_id: ObjectId, xobject_
                     _ => Dictionary::new(),
                 }
             } else {
-                Dictionary::new()
+                // No Resources on page - check parent for inherited Resources
+                if let Ok(parent) = page_dict.get(b"Parent") {
+                    if let Object::Reference(parent_id) = parent {
+                        get_inherited_resources(doc, *parent_id)
+                    } else {
+                        Dictionary::new()
+                    }
+                } else {
+                    Dictionary::new()
+                }
             }
         } else {
             Dictionary::new()
@@ -1084,6 +1173,33 @@ fn add_xobject_to_page_resources(doc: &mut Document, page_id: ObjectId, xobject_
     }
 
     Ok(())
+}
+
+/// Get Resources from page tree parent (handles inheritance)
+fn get_inherited_resources(doc: &Document, parent_id: ObjectId) -> Dictionary {
+    if let Ok(Object::Dictionary(parent_dict)) = doc.get_object(parent_id) {
+        // Check for Resources on this parent
+        if let Ok(res) = parent_dict.get(b"Resources") {
+            match res {
+                Object::Dictionary(dict) => return dict.clone(),
+                Object::Reference(res_id) => {
+                    if let Ok(Object::Dictionary(dict)) = doc.get_object(*res_id) {
+                        return dict.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Not found here, check grandparent
+        if let Ok(grandparent) = parent_dict.get(b"Parent") {
+            if let Object::Reference(grandparent_id) = grandparent {
+                return get_inherited_resources(doc, *grandparent_id);
+            }
+        }
+    }
+
+    Dictionary::new()
 }
 
 #[cfg(test)]
