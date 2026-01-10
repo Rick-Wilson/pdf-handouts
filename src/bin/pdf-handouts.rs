@@ -3,6 +3,7 @@
 //! A command-line tool for merging PDFs and adding headers/footers.
 
 use clap::{Parser, Subcommand};
+use glob::glob;
 use std::path::PathBuf;
 use std::process;
 
@@ -16,6 +17,18 @@ use pdf_handouts::date::{parse_date_expression, resolve_date};
 #[derive(Parser)]
 #[command(name = "pdf-handouts")]
 #[command(author, version, about, long_about = None)]
+#[command(after_help = "EXAMPLES:
+    # Merge PDFs and add a footer
+    pdf-handouts build -o output.pdf --footer-center \"Page [page]\" *.pdf
+
+    # Merge numbered PDFs in order
+    pdf-handouts build -o handout.pdf \"[0-9]*.pdf\"
+
+    # Add header and footer with date
+    pdf-handouts headers input.pdf -o output.pdf --title \"My Document\" --footer-right \"[date]\" --date today
+
+    # Merge and open result
+    pdf-handouts build -o output.pdf --open file1.pdf file2.pdf")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -25,13 +38,17 @@ struct Cli {
 enum Commands {
     /// Merge multiple PDF files into one
     Merge {
-        /// Input PDF files (in order)
+        /// Input PDF files (in order). Supports glob patterns like "*.pdf"
         #[arg(required = true)]
-        inputs: Vec<PathBuf>,
+        inputs: Vec<String>,
 
         /// Output PDF file path
         #[arg(short, long)]
         output: PathBuf,
+
+        /// Open the output file after creation
+        #[arg(long)]
+        open: bool,
     },
 
     /// Add headers and footers to a PDF
@@ -76,13 +93,17 @@ enum Commands {
         /// Font specification for footer only (overrides --font)
         #[arg(long)]
         footer_font: Option<String>,
+
+        /// Open the output file after creation
+        #[arg(long)]
+        open: bool,
     },
 
     /// Merge PDFs and add headers/footers in one step
     Build {
-        /// Input PDF files (in order)
+        /// Input PDF files (in order). Supports glob patterns like "*.pdf"
         #[arg(required = true)]
-        inputs: Vec<PathBuf>,
+        inputs: Vec<String>,
 
         /// Output PDF file path
         #[arg(short, long)]
@@ -121,6 +142,10 @@ enum Commands {
         /// Font specification for footer only (overrides --font)
         #[arg(long)]
         footer_font: Option<String>,
+
+        /// Open the output file after creation
+        #[arg(long)]
+        open: bool,
     },
 
     /// Show information about a PDF file
@@ -134,25 +159,25 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Merge { inputs, output } => {
-            cmd_merge(inputs, output)
+        Commands::Merge { inputs, output, open } => {
+            cmd_merge(inputs, output, open)
         }
         Commands::Headers {
             input, output, title, footer_left, footer_center, footer_right,
-            date, font, header_font, footer_font,
+            date, font, header_font, footer_font, open,
         } => {
             cmd_headers(
                 input, output, title, footer_left, footer_center, footer_right,
-                date, font, header_font, footer_font,
+                date, font, header_font, footer_font, open,
             )
         }
         Commands::Build {
             inputs, output, title, footer_left, footer_center, footer_right,
-            date, font, header_font, footer_font,
+            date, font, header_font, footer_font, open,
         } => {
             cmd_build(
                 inputs, output, title, footer_left, footer_center, footer_right,
-                date, font, header_font, footer_font,
+                date, font, header_font, footer_font, open,
             )
         }
         Commands::Info { input } => {
@@ -166,8 +191,66 @@ fn main() {
     }
 }
 
+/// Expand glob patterns in input paths
+fn expand_globs(patterns: Vec<String>) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut paths = Vec::new();
+
+    for pattern in patterns {
+        // Check if pattern contains glob characters
+        if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+            let mut matched = false;
+            for entry in glob(&pattern)? {
+                match entry {
+                    Ok(path) => {
+                        paths.push(path);
+                        matched = true;
+                    }
+                    Err(e) => eprintln!("Warning: glob error for {}: {}", pattern, e),
+                }
+            }
+            if !matched {
+                return Err(format!("No files matched pattern: {}", pattern).into());
+            }
+        } else {
+            // No glob characters, treat as literal path
+            paths.push(PathBuf::from(pattern));
+        }
+    }
+
+    // Sort paths for consistent ordering
+    paths.sort();
+
+    Ok(paths)
+}
+
+/// Open a file with the system default application
+fn open_file(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path.display().to_string()])
+            .spawn()?;
+    }
+    Ok(())
+}
+
 /// Merge multiple PDFs into one
-fn cmd_merge(inputs: Vec<PathBuf>, output: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_merge(inputs: Vec<String>, output: PathBuf, open: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Expand glob patterns
+    let inputs = expand_globs(inputs)?;
+
     // Validate inputs exist
     for path in &inputs {
         if !path.exists() {
@@ -185,6 +268,11 @@ fn cmd_merge(inputs: Vec<PathBuf>, output: PathBuf) -> Result<(), Box<dyn std::e
     merge_pdfs(&options)?;
 
     eprintln!("Merged to: {}", output.display());
+
+    if open {
+        open_file(&output)?;
+    }
+
     Ok(())
 }
 
@@ -200,6 +288,7 @@ fn cmd_headers(
     font: Option<String>,
     header_font: Option<String>,
     footer_font: Option<String>,
+    open: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !input.exists() {
         return Err(format!("Input file not found: {}", input.display()).into());
@@ -234,12 +323,17 @@ fn cmd_headers(
     add_headers_footers(&input, &output, &options)?;
 
     eprintln!("Output: {}", output.display());
+
+    if open {
+        open_file(&output)?;
+    }
+
     Ok(())
 }
 
 /// Merge PDFs and add headers/footers in one step
 fn cmd_build(
-    inputs: Vec<PathBuf>,
+    inputs: Vec<String>,
     output: PathBuf,
     title: Option<String>,
     footer_left: Option<String>,
@@ -249,7 +343,11 @@ fn cmd_build(
     font: Option<String>,
     header_font: Option<String>,
     footer_font: Option<String>,
+    open: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Expand glob patterns
+    let inputs = expand_globs(inputs)?;
+
     // Validate inputs exist
     for path in &inputs {
         if !path.exists() {
@@ -302,6 +400,11 @@ fn cmd_build(
     let _ = std::fs::remove_file(&temp_merged);
 
     eprintln!("Output: {}", output.display());
+
+    if open {
+        open_file(&output)?;
+    }
+
     Ok(())
 }
 
