@@ -10,64 +10,6 @@ use chrono::NaiveDate;
 use crate::error::Result;
 use crate::date::format_date;
 
-/// Represents a PDF transformation matrix [a b c d e f]
-/// where: x' = a*x + c*y + e, y' = b*x + d*y + f
-#[derive(Debug, Clone)]
-struct TransformMatrix {
-    a: f32,
-    b: f32,
-    c: f32,
-    d: f32,
-    e: f32,
-    f: f32,
-}
-
-impl TransformMatrix {
-    /// Identity matrix (no transformation)
-    fn identity() -> Self {
-        Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }
-    }
-
-    /// Calculate the inverse of this transformation matrix
-    fn inverse(&self) -> Self {
-        // For a 2D affine transformation matrix:
-        // | a  c  e |
-        // | b  d  f |
-        // | 0  0  1 |
-        //
-        // The determinant is: det = a*d - b*c
-        // The inverse is:
-        // | d/det   -c/det   (c*f - d*e)/det |
-        // | -b/det   a/det   (b*e - a*f)/det |
-        // |   0       0            1         |
-
-        let det = self.a * self.d - self.b * self.c;
-        if det.abs() < 1e-10 {
-            // Singular matrix, return identity
-            return Self::identity();
-        }
-
-        Self {
-            a: self.d / det,
-            b: -self.b / det,
-            c: -self.c / det,
-            d: self.a / det,
-            e: (self.c * self.f - self.d * self.e) / det,
-            f: (self.b * self.e - self.a * self.f) / det,
-        }
-    }
-
-    /// Check if this is (approximately) the identity matrix
-    fn is_identity(&self) -> bool {
-        (self.a - 1.0).abs() < 0.001 &&
-        self.b.abs() < 0.001 &&
-        self.c.abs() < 0.001 &&
-        (self.d - 1.0).abs() < 0.001 &&
-        self.e.abs() < 0.001 &&
-        self.f.abs() < 0.001
-    }
-}
-
 /// Options for adding headers and footers to a PDF
 #[derive(Debug, Clone)]
 pub struct HeaderFooterOptions {
@@ -151,8 +93,13 @@ impl HeaderFooterOptions {
 
 /// Add headers and footers directly to a PDF
 ///
-/// This function loads a PDF, embeds a font, and adds header/footer content streams
-/// directly to each page. This is simpler than creating a separate watermark PDF.
+/// This function uses the same approach as PDFtk's stamp command:
+/// 1. Wrap original page content in q/Q to isolate its transformations
+/// 2. Create a Form XObject containing headers/footers
+/// 3. Draw the XObject after the Q (restore) so it uses clean coordinates
+///
+/// This approach works reliably with all PDFs, including Google Docs exports
+/// that apply unusual coordinate transformations.
 ///
 /// # Example
 ///
@@ -197,12 +144,9 @@ pub fn add_headers_footers(
         .map(|(i, (_num, id))| (i, *id))
         .collect();
 
-    // For each page, detect transformation and create appropriate Form XObject
+    // For each page, wrap content in q/Q and add XObject overlay
     for (i, page_id) in pages.iter() {
         let page_number = i + 1;
-
-        // Detect the page's transformation matrix from its content stream
-        let transform = detect_page_transformation(&doc, *page_id)?;
 
         // Generate the content stream for this page's headers/footers
         let content = generate_header_footer_content(
@@ -212,21 +156,16 @@ pub fn add_headers_footers(
             options,
         );
 
-        // Create a Form XObject with the inverse transformation for this specific page
-        let xobject_id = create_form_xobject_with_transform(&mut doc, content, font_id, &transform)?;
+        // Create a Form XObject (no inverse transform needed - we reset CTM with q/Q wrapper)
+        let xobject_id = create_form_xobject(&mut doc, content, font_id)?;
 
         // Add the Form XObject to the page's Resources
         add_xobject_to_page_resources(&mut doc, *page_id, xobject_id)?;
 
-        // Add content stream that invokes the Form XObject
-        let invoke_content = format!("q\n/HeaderFooter Do\nQ\n");
-        let content_stream_id = doc.add_object(Stream::new(
-            Dictionary::new(),
-            invoke_content.into_bytes(),
-        ));
-
-        // Append the content stream to the page's Contents
-        append_content_to_page(&mut doc, *page_id, content_stream_id)?;
+        // Wrap original content in q/Q and append XObject invocation
+        // This is the key: the Q resets the graphics state (including CTM),
+        // then we draw our XObject in clean page coordinates
+        wrap_content_and_append_xobject(&mut doc, *page_id)?;
     }
 
     // Save the modified PDF
@@ -546,293 +485,6 @@ fn create_liberation_serif_widths() -> Vec<Object> {
     ];
 
     widths.into_iter().map(Object::Integer).collect()
-}
-
-/// Detect the transformation matrix applied at the start of a page's content stream
-///
-/// PDF content streams may start with a `cm` operator that transforms the coordinate system.
-/// This function parses the beginning of the content stream to find such a transformation.
-/// If no transformation is found, returns identity matrix.
-fn detect_page_transformation(doc: &Document, page_id: ObjectId) -> Result<TransformMatrix> {
-    let page_obj = doc.get_object(page_id)?;
-
-    if let Object::Dictionary(page_dict) = page_obj {
-        if let Ok(contents) = page_dict.get(b"Contents") {
-            // Get content stream ID(s)
-            let content_ids: Vec<ObjectId> = match contents {
-                Object::Reference(id) => vec![*id],
-                Object::Array(arr) => arr.iter().filter_map(|o| {
-                    if let Object::Reference(id) = o { Some(*id) } else { None }
-                }).collect(),
-                _ => vec![],
-            };
-
-            // Check the first content stream for a transformation
-            if let Some(content_id) = content_ids.first() {
-                if let Ok(Object::Stream(stream)) = doc.get_object(*content_id) {
-                    let content_str = String::from_utf8_lossy(&stream.content);
-                    return Ok(parse_initial_transformation(&content_str));
-                }
-            }
-        }
-    }
-
-    Ok(TransformMatrix::identity())
-}
-
-/// Parse the initial transformation matrix from a content stream
-///
-/// Looks for patterns like:
-/// - `.24 0 0 -.24 0 792 cm` (Google Docs - NOT wrapped in q/Q)
-/// - `0.75 0 0 -0.75 0 792 cm` (some PDFs - NOT wrapped)
-/// - `q ... 0.12 0 0 0.12 0 0 cm` (wrapped in q - ignored, returns identity)
-///
-/// The key distinction is whether the transform is wrapped in q/Q or not.
-/// If wrapped, the graphics state is restored before our appended content runs.
-/// If NOT wrapped, the transform persists and we need to counteract it.
-fn parse_initial_transformation(content: &str) -> TransformMatrix {
-    // Look for 'cm' operator with 6 numbers before it
-    // The pattern is: num num num num num num cm
-
-    let content = content.trim();
-
-    // Find the first 'cm' operator
-    if let Some(cm_pos) = content.find(" cm") {
-        // Get the text before 'cm'
-        let before_cm = &content[..cm_pos];
-
-        // Check if there's a 'q' (graphics state save) before this cm
-        // If the content starts with 'q' or has 'q' before the matrix numbers,
-        // then the transform is wrapped and will be restored by a matching Q
-        let parts: Vec<&str> = before_cm.split_whitespace().collect();
-
-        // Check if any of the parts before the 6 matrix numbers is 'q'
-        if parts.len() >= 6 {
-            let start = parts.len() - 6;
-
-            // Check if there's a 'q' in the parts before the matrix
-            let has_q_before = parts[..start].iter().any(|&p| p == "q");
-
-            // Also check if the very beginning is 'q' (common pattern)
-            let starts_with_q = content.starts_with("q ");
-
-            if has_q_before || starts_with_q {
-                // Transform is wrapped in graphics state save/restore
-                // The CTM will be restored to identity (or previous state) before
-                // our appended content runs, so we don't need to counteract it
-                return TransformMatrix::identity();
-            }
-
-            // Parse the matrix numbers
-            let nums: Vec<f32> = parts[start..]
-                .iter()
-                .filter_map(|s| s.parse::<f32>().ok())
-                .collect();
-
-            if nums.len() == 6 {
-                return TransformMatrix {
-                    a: nums[0],
-                    b: nums[1],
-                    c: nums[2],
-                    d: nums[3],
-                    e: nums[4],
-                    f: nums[5],
-                };
-            }
-        }
-    }
-
-    // No transformation found, return identity
-    TransformMatrix::identity()
-}
-
-/// Embed Liberation Serif font into the PDF and return its object ID (UNUSED - keeping for reference)
-#[allow(dead_code)]
-fn embed_liberation_serif_old(doc: &mut Document) -> Result<ObjectId> {
-    // Load the embedded font data
-    const LIBERATION_SERIF: &[u8] = include_bytes!("../../assets/fonts/LiberationSerif-Regular.ttf");
-
-    // Create font stream object
-    let font_stream_id = doc.add_object(Stream::new(
-        Dictionary::from_iter(vec![
-            ("Length1", Object::Integer(LIBERATION_SERIF.len() as i64)),
-        ]),
-        LIBERATION_SERIF.to_vec(),
-    ));
-
-    // Create font descriptor
-    let mut font_descriptor = Dictionary::new();
-    font_descriptor.set("Type", Object::Name(b"FontDescriptor".to_vec()));
-    font_descriptor.set("FontName", Object::Name(b"LiberationSerif".to_vec()));
-    font_descriptor.set("Flags", Object::Integer(32)); // Symbolic
-    font_descriptor.set("FontBBox", Object::Array(vec![
-        Object::Integer(-543),
-        Object::Integer(-303),
-        Object::Integer(1277),
-        Object::Integer(981),
-    ]));
-    font_descriptor.set("ItalicAngle", Object::Integer(0));
-    font_descriptor.set("Ascent", Object::Integer(891));
-    font_descriptor.set("Descent", Object::Integer(-216));
-    font_descriptor.set("CapHeight", Object::Integer(981));
-    font_descriptor.set("StemV", Object::Integer(80));
-    font_descriptor.set("FontFile2", Object::Reference(font_stream_id));
-
-    let font_descriptor_id = doc.add_object(Object::Dictionary(font_descriptor));
-
-    // Create CIDFont dictionary
-    let mut cid_font = Dictionary::new();
-    cid_font.set("Type", Object::Name(b"Font".to_vec()));
-    cid_font.set("Subtype", Object::Name(b"CIDFontType2".to_vec()));
-    cid_font.set("BaseFont", Object::Name(b"LiberationSerif".to_vec()));
-    cid_font.set("CIDSystemInfo", Object::Dictionary(Dictionary::from_iter(vec![
-        ("Registry", Object::String(b"Adobe".to_vec(), lopdf::StringFormat::Literal)),
-        ("Ordering", Object::String(b"Identity".to_vec(), lopdf::StringFormat::Literal)),
-        ("Supplement", Object::Integer(0)),
-    ])));
-    cid_font.set("FontDescriptor", Object::Reference(font_descriptor_id));
-    cid_font.set("DW", Object::Integer(1000)); // Default width
-
-    let cid_font_id = doc.add_object(Object::Dictionary(cid_font));
-
-    // Create a basic ToUnicode CMap for ASCII characters
-    let to_unicode_cmap = create_basic_tounicode_cmap();
-    let to_unicode_id = doc.add_object(Stream::new(
-        Dictionary::new(),
-        to_unicode_cmap.into_bytes(),
-    ));
-
-    // Create Type0 font dictionary
-    let mut font = Dictionary::new();
-    font.set("Type", Object::Name(b"Font".to_vec()));
-    font.set("Subtype", Object::Name(b"Type0".to_vec()));
-    font.set("BaseFont", Object::Name(b"LiberationSerif".to_vec()));
-    font.set("Encoding", Object::Name(b"Identity-H".to_vec()));
-    font.set("DescendantFonts", Object::Array(vec![Object::Reference(cid_font_id)]));
-    font.set("ToUnicode", Object::Reference(to_unicode_id));
-
-    let font_id = doc.add_object(Object::Dictionary(font));
-
-    Ok(font_id)
-}
-
-/// Create a basic ToUnicode CMap for ASCII characters (32-126)
-fn create_basic_tounicode_cmap() -> String {
-    r#"/CIDInit /ProcSet findresource begin
-12 dict begin
-begincmap
-/CIDSystemInfo
-<< /Registry (Adobe)
-/Ordering (UCS)
-/Supplement 0
->> def
-/CMapName /Adobe-Identity-UCS def
-/CMapType 2 def
-1 begincodespacerange
-<0000> <FFFF>
-endcodespacerange
-95 beginbfchar
-<0020> <0020>
-<0021> <0021>
-<0022> <0022>
-<0023> <0023>
-<0024> <0024>
-<0025> <0025>
-<0026> <0026>
-<0027> <0027>
-<0028> <0028>
-<0029> <0029>
-<002A> <002A>
-<002B> <002B>
-<002C> <002C>
-<002D> <002D>
-<002E> <002E>
-<002F> <002F>
-<0030> <0030>
-<0031> <0031>
-<0032> <0032>
-<0033> <0033>
-<0034> <0034>
-<0035> <0035>
-<0036> <0036>
-<0037> <0037>
-<0038> <0038>
-<0039> <0039>
-<003A> <003A>
-<003B> <003B>
-<003C> <003C>
-<003D> <003D>
-<003E> <003E>
-<003F> <003F>
-<0040> <0040>
-<0041> <0041>
-<0042> <0042>
-<0043> <0043>
-<0044> <0044>
-<0045> <0045>
-<0046> <0046>
-<0047> <0047>
-<0048> <0048>
-<0049> <0049>
-<004A> <004A>
-<004B> <004B>
-<004C> <004C>
-<004D> <004D>
-<004E> <004E>
-<004F> <004F>
-<0050> <0050>
-<0051> <0051>
-<0052> <0052>
-<0053> <0053>
-<0054> <0054>
-<0055> <0055>
-<0056> <0056>
-<0057> <0057>
-<0058> <0058>
-<0059> <0059>
-<005A> <005A>
-<005B> <005B>
-<005C> <005C>
-<005D> <005D>
-<005E> <005E>
-<005F> <005F>
-<0060> <0060>
-<0061> <0061>
-<0062> <0062>
-<0063> <0063>
-<0064> <0064>
-<0065> <0065>
-<0066> <0066>
-<0067> <0067>
-<0068> <0068>
-<0069> <0069>
-<006A> <006A>
-<006B> <006B>
-<006C> <006C>
-<006D> <006D>
-<006E> <006E>
-<006F> <006F>
-<0070> <0070>
-<0071> <0071>
-<0072> <0072>
-<0073> <0073>
-<0074> <0074>
-<0075> <0075>
-<0076> <0076>
-<0077> <0077>
-<0078> <0078>
-<0079> <0079>
-<007A> <007A>
-<007B> <007B>
-<007C> <007C>
-<007D> <007D>
-<007E> <007E>
-endbfchar
-endcmap
-CMapName currentdict /CMap defineresource pop
-end
-end
-"#.to_string()
 }
 
 /// Generate PDF content stream operators for headers/footers
@@ -1261,12 +913,15 @@ fn estimate_text_width(text: &str, font_size: f32) -> f32 {
     text.len() as f32 * font_size * 0.48
 }
 
-/// Create a Form XObject with coordinate system adjusted for the detected page transformation
-fn create_form_xobject_with_transform(
+/// Create a Form XObject for headers/footers
+///
+/// The Form XObject has its own coordinate system defined by BBox.
+/// Since we wrap the original page content in q/Q before invoking this XObject,
+/// it renders in standard page coordinates (identity CTM).
+fn create_form_xobject(
     doc: &mut Document,
     content: String,
     font_id: ObjectId,
-    page_transform: &TransformMatrix,
 ) -> Result<ObjectId> {
     // Create Resources dictionary for the Form XObject
     let mut resources = Dictionary::new();
@@ -1281,7 +936,6 @@ fn create_form_xobject_with_transform(
     xobject_dict.set("FormType", Object::Integer(1));
 
     // BBox defines the Form's coordinate system - use standard Letter size
-    // The Form content uses coordinates within this bounding box
     xobject_dict.set("BBox", Object::Array(vec![
         Object::Integer(0),
         Object::Integer(0),
@@ -1289,32 +943,15 @@ fn create_form_xobject_with_transform(
         Object::Integer(792),
     ]));
 
-    // Calculate the inverse transformation to counteract the page's CTM
-    // When our Form XObject is invoked via Do, the page's transformation is in effect.
-    // We apply the inverse so our content renders at the correct position.
-    let inverse = page_transform.inverse();
-
-    // Only apply a non-identity matrix if the page has a transformation
-    if !page_transform.is_identity() {
-        xobject_dict.set("Matrix", Object::Array(vec![
-            Object::Real(inverse.a),
-            Object::Real(inverse.b),
-            Object::Real(inverse.c),
-            Object::Real(inverse.d),
-            Object::Real(inverse.e),
-            Object::Real(inverse.f),
-        ]));
-    } else {
-        // Identity matrix for pages without transformation
-        xobject_dict.set("Matrix", Object::Array(vec![
-            Object::Integer(1),
-            Object::Integer(0),
-            Object::Integer(0),
-            Object::Integer(1),
-            Object::Integer(0),
-            Object::Integer(0),
-        ]));
-    }
+    // Identity matrix - our XObject uses standard page coordinates
+    xobject_dict.set("Matrix", Object::Array(vec![
+        Object::Integer(1),
+        Object::Integer(0),
+        Object::Integer(0),
+        Object::Integer(1),
+        Object::Integer(0),
+        Object::Integer(0),
+    ]));
 
     xobject_dict.set("Resources", Object::Dictionary(resources));
 
@@ -1328,6 +965,72 @@ fn create_form_xobject_with_transform(
 
     let xobject_id = doc.add_object(Object::Stream(xobject_stream));
     Ok(xobject_id)
+}
+
+/// Wrap page content in q/Q and append XObject invocation
+///
+/// This is the key to making headers/footers work with any PDF:
+/// 1. Prepend "q\n" to save graphics state before original content
+/// 2. Append "Q\n" after original content to restore state
+/// 3. Append XObject invocation in clean coordinate space
+///
+/// The structure becomes:
+/// ```text
+/// Stream 1: q
+/// Stream 2: [original content]
+/// Stream 3: Q
+///           q 1 0 0 1 0 0 cm /HeaderFooter Do Q
+/// ```
+fn wrap_content_and_append_xobject(doc: &mut Document, page_id: ObjectId) -> Result<()> {
+    // Create stream for "q\n" (save graphics state)
+    let q_stream_id = doc.add_object(Stream::new(
+        Dictionary::new(),
+        b"q\n".to_vec(),
+    ));
+
+    // Create stream for "Q\n" followed by XObject invocation
+    // The Q restores graphics state, then we draw our overlay in clean coordinates
+    let qx_content = b" Q\nq\nq 1 0 0 1 0 0 cm /HeaderFooter Do Q\nQ\n".to_vec();
+    let qx_stream_id = doc.add_object(Stream::new(
+        Dictionary::new(),
+        qx_content,
+    ));
+
+    // Get the page and modify its Contents
+    let page_obj = doc.get_object_mut(page_id)?;
+
+    if let Object::Dictionary(ref mut page_dict) = page_obj {
+        let existing_content = page_dict.get(b"Contents").ok().cloned();
+
+        let new_contents = match existing_content {
+            Some(Object::Reference(content_id)) => {
+                // Single content stream -> wrap it
+                vec![
+                    Object::Reference(q_stream_id),
+                    Object::Reference(content_id),
+                    Object::Reference(qx_stream_id),
+                ]
+            }
+            Some(Object::Array(content_array)) => {
+                // Multiple content streams -> wrap them all
+                let mut new_array = vec![Object::Reference(q_stream_id)];
+                new_array.extend(content_array);
+                new_array.push(Object::Reference(qx_stream_id));
+                new_array
+            }
+            _ => {
+                // No existing content - just add our XObject invocation
+                vec![
+                    Object::Reference(q_stream_id),
+                    Object::Reference(qx_stream_id),
+                ]
+            }
+        };
+
+        page_dict.set("Contents", Object::Array(new_contents));
+    }
+
+    Ok(())
 }
 
 /// Add XObject reference to page's Resources dictionary
@@ -1378,105 +1081,6 @@ fn add_xobject_to_page_resources(doc: &mut Document, page_id: ObjectId, xobject_
         // Set the Resources directly on the page (not as a reference)
         // This ensures the page has its own copy with our XObject
         page_dict.set("Resources", Object::Dictionary(new_resources));
-    }
-
-    Ok(())
-}
-
-/// Add font reference to page's Resources dictionary
-fn add_font_to_page_resources(doc: &mut Document, page_id: ObjectId, font_id: ObjectId) -> Result<()> {
-    let page_obj = doc.get_object_mut(page_id)?;
-
-    if let Object::Dictionary(ref mut page_dict) = page_obj {
-        // Get or create Resources dictionary
-        let mut resources = if let Ok(res) = page_dict.get(b"Resources") {
-            res.clone()
-        } else {
-            Object::Dictionary(Dictionary::new())
-        };
-
-        if let Object::Dictionary(ref mut resources_dict) = resources {
-            // Get or create Font subdictionary
-            let mut fonts = if let Ok(Object::Dictionary(f)) = resources_dict.get(b"Font") {
-                f.clone()
-            } else {
-                Dictionary::new()
-            };
-
-            // Add our font as /F1
-            fonts.set("F1", Object::Reference(font_id));
-
-            resources_dict.set("Font", Object::Dictionary(fonts));
-            page_dict.set("Resources", resources);
-        }
-    }
-
-    Ok(())
-}
-
-/// Prepend a content stream to a page's Contents
-///
-/// We prepend so our headers/footers are drawn BEFORE any page transformations,
-/// giving them an independent coordinate system.
-fn prepend_content_to_page(doc: &mut Document, page_id: ObjectId, new_content_id: ObjectId) -> Result<()> {
-    let page_obj = doc.get_object_mut(page_id)?;
-
-    if let Object::Dictionary(ref mut page_dict) = page_obj {
-        let existing_content = page_dict.get(b"Contents").ok().cloned();
-
-        match existing_content {
-            Some(Object::Reference(content_id)) => {
-                // Convert single reference to array, PREPEND our content
-                let new_contents = vec![
-                    Object::Reference(new_content_id),
-                    Object::Reference(content_id),
-                ];
-                page_dict.set("Contents", Object::Array(new_contents));
-            }
-            Some(Object::Array(mut content_array)) => {
-                // PREPEND to existing array
-                content_array.insert(0, Object::Reference(new_content_id));
-                page_dict.set("Contents", Object::Array(content_array));
-            }
-            _ => {
-                // No existing content, create new array
-                page_dict.set("Contents", Object::Array(vec![Object::Reference(new_content_id)]));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Append a content stream to a page's Contents
-///
-/// We append our content after the original content so our headers/footers are drawn
-/// on top (not covered by background fills).
-fn append_content_to_page(doc: &mut Document, page_id: ObjectId, new_content_id: ObjectId) -> Result<()> {
-    let page_obj = doc.get_object_mut(page_id)?;
-
-    if let Object::Dictionary(ref mut page_dict) = page_obj {
-        let existing_content = page_dict.get(b"Contents").ok().cloned();
-
-        match existing_content {
-            Some(Object::Reference(content_id)) => {
-                // Convert single reference to array, append our content
-                let new_contents = vec![
-                    Object::Reference(content_id),
-                    Object::Reference(new_content_id),
-                ];
-                page_dict.set("Contents", Object::Array(new_contents));
-            }
-            Some(Object::Array(mut content_array)) => {
-                // Append to existing array
-                content_array.push(Object::Reference(new_content_id));
-                page_dict.set("Contents", Object::Array(content_array));
-            }
-            _ => {
-                // No existing content, create new array
-                page_dict.set("Contents", Object::Array(vec![Object::Reference(new_content_id)]));
-            }
-        }
     }
 
     Ok(())
