@@ -10,6 +10,66 @@ use chrono::NaiveDate;
 use crate::error::Result;
 use crate::date::format_date;
 
+/// Options for masking existing header/footer content
+#[derive(Debug, Clone, Default)]
+pub struct MaskOptions {
+    /// Height of header mask on first page only (in inches)
+    pub header_height: Option<f32>,
+    /// Height of footer mask on first page only (in inches)
+    pub footer_height: Option<f32>,
+    /// Height of header mask on all pages (in inches)
+    pub header_all_height: Option<f32>,
+    /// Height of footer mask on all pages (in inches)
+    pub footer_all_height: Option<f32>,
+    /// Mask color as RGB tuple (0.0-1.0 for each component), defaults to white
+    pub color: (f32, f32, f32),
+}
+
+impl MaskOptions {
+    /// Create new MaskOptions with default white color
+    pub fn new() -> Self {
+        Self {
+            header_height: None,
+            footer_height: None,
+            header_all_height: None,
+            footer_all_height: None,
+            color: (1.0, 1.0, 1.0), // White
+        }
+    }
+
+    /// Check if any masking is configured
+    pub fn has_any_mask(&self) -> bool {
+        self.header_height.is_some()
+            || self.footer_height.is_some()
+            || self.header_all_height.is_some()
+            || self.footer_all_height.is_some()
+    }
+
+    /// Get the effective header mask height for a given page
+    pub fn effective_header_height(&self, is_first_page: bool) -> Option<f32> {
+        // header_all takes precedence, then header (first page only)
+        self.header_all_height.or_else(|| {
+            if is_first_page {
+                self.header_height
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Get the effective footer mask height for a given page
+    pub fn effective_footer_height(&self, is_first_page: bool) -> Option<f32> {
+        // footer_all takes precedence, then footer (first page only)
+        self.footer_all_height.or_else(|| {
+            if is_first_page {
+                self.footer_height
+            } else {
+                None
+            }
+        })
+    }
+}
+
 /// Options for adding headers and footers to a PDF
 #[derive(Debug, Clone)]
 pub struct HeaderFooterOptions {
@@ -35,6 +95,8 @@ pub struct HeaderFooterOptions {
     pub header_font: Option<FontSpec>,
     /// Footer font specification (overrides footer_font_size if set)
     pub footer_font: Option<FontSpec>,
+    /// Masking options for covering existing header/footer content
+    pub mask: MaskOptions,
 }
 
 impl Default for HeaderFooterOptions {
@@ -51,6 +113,7 @@ impl Default for HeaderFooterOptions {
             footer_font_size: 14.0,
             header_font: None,
             footer_font: None,
+            mask: MaskOptions::new(),
         }
     }
 }
@@ -499,6 +562,38 @@ fn generate_header_footer_content(
     // Page dimensions (US Letter: 612pt × 792pt)
     let page_width = 612.0;
     let page_height = 792.0;
+
+    // Points per inch for converting mask heights
+    const POINTS_PER_INCH: f32 = 72.0;
+
+    // Draw mask rectangles FIRST (so they appear behind text)
+    // Header mask (at top of page)
+    if let Some(header_height_inches) = options.mask.effective_header_height(is_first_page) {
+        let height_pt = header_height_inches * POINTS_PER_INCH;
+        let (r, g, b) = options.mask.color;
+        // Set fill color
+        content.push_str(&format!("{:.3} {:.3} {:.3} rg\n", r, g, b));
+        // Draw rectangle: x y width height re (rectangle) f (fill)
+        // Header is at top of page, so y = page_height - height
+        content.push_str(&format!("0 {} {} {} re f\n",
+            page_height - height_pt,
+            page_width,
+            height_pt
+        ));
+    }
+
+    // Footer mask (at bottom of page)
+    if let Some(footer_height_inches) = options.mask.effective_footer_height(is_first_page) {
+        let height_pt = footer_height_inches * POINTS_PER_INCH;
+        let (r, g, b) = options.mask.color;
+        // Set fill color
+        content.push_str(&format!("{:.3} {:.3} {:.3} rg\n", r, g, b));
+        // Draw rectangle at bottom of page (y = 0)
+        content.push_str(&format!("0 0 {} {} re f\n",
+            page_width,
+            height_pt
+        ));
+    }
 
     // Get effective font sizes from options (respects FontSpec if set)
     let header_font_size = options.effective_header_font_size();

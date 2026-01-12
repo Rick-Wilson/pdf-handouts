@@ -9,7 +9,7 @@ use std::process;
 
 use pdf_handouts::pdf::{
     merge_pdfs, add_headers_footers,
-    MergeOptions, HeaderFooterOptions, FontSpec,
+    MergeOptions, HeaderFooterOptions, FontSpec, MaskOptions,
 };
 use pdf_handouts::date::{parse_date_expression, resolve_date};
 
@@ -17,18 +17,58 @@ use pdf_handouts::date::{parse_date_expression, resolve_date};
 #[derive(Parser)]
 #[command(name = "pdf-handouts")]
 #[command(author, version, about, long_about = None)]
-#[command(after_help = "EXAMPLES:
-    # Merge PDFs and add a footer
+#[command(after_help = "COMMANDS:
+    build     Merge PDFs and add headers/footers in one step
+    headers   Add headers/footers to an existing PDF
+    merge     Merge multiple PDFs (no headers/footers)
+    info      Show PDF information (page count, metadata)
+
+OPTIONS (for build and headers commands):
+    -o, --output <FILE>          Output PDF file path (required)
+    --title <TEXT>               Title centered at top of first page
+    --footer-left <TEXT>         Footer left section
+    --footer-center <TEXT>       Footer center section
+    --footer-right <TEXT>        Footer right section
+    --date <DATE>                Date for [date] placeholder
+    --font <SPEC>                Font for both header and footer
+    --header-font <SPEC>         Font for header only (overrides --font)
+    --footer-font <SPEC>         Font for footer only (overrides --font)
+    --mask-header <INCHES>       Mask header on first page only
+    --mask-footer <INCHES>       Mask footer on first page only
+    --mask-header-all <INCHES>   Mask header on all pages
+    --mask-footer-all <INCHES>   Mask footer on all pages
+    --mask-color <COLOR>         Mask color [default: #ffffff]
+    --open                       Open output file after creation
+
+PLACEHOLDERS (use in footer text):
+    [page]    Current page number
+    [pages]   Total page count
+    [date]    Formatted date (requires --date)
+    |         Line break (or use [br])
+
+FONT SPEC FORMAT:
+    \"[bold] [italic] [size[pt]] [family] [#rrggbb]\"
+    Examples: \"14pt\", \"bold 16pt #333333\", \"italic 12pt Liberation_Serif\"
+
+DATE EXPRESSIONS:
+    today, 2026-01-14, 01/14/2026, Tuesday, Tuesday+1
+
+INLINE STYLING:
+    [font italic]text[/font]    Italic text
+    [font bold]text[/font]      Bold text
+
+EXAMPLES:
+    # Merge PDFs and add footer
     pdf-handouts build -o output.pdf --footer-center \"Page [page]\" *.pdf
 
-    # Merge numbered PDFs in order
-    pdf-handouts build -o handout.pdf \"[0-9]*.pdf\"
+    # Add headers with date
+    pdf-handouts headers input.pdf -o output.pdf --title \"My Doc\" --date today
 
-    # Add header and footer with date
-    pdf-handouts headers input.pdf -o output.pdf --title \"My Document\" --footer-right \"[date]\" --date today
+    # Mask existing footer and add new one
+    pdf-handouts build -o out.pdf --mask-footer-all 0.5 --footer-right \"Page [page]\" *.pdf
 
-    # Merge and open result
-    pdf-handouts build -o output.pdf --open file1.pdf file2.pdf")]
+    # Custom styling
+    pdf-handouts build -o out.pdf --font \"14pt #555555\" --header-font \"24pt bold\" *.pdf")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -94,6 +134,26 @@ enum Commands {
         #[arg(long)]
         footer_font: Option<String>,
 
+        /// Mask header area on first page only (height in inches, e.g., "0.5")
+        #[arg(long, value_name = "INCHES")]
+        mask_header: Option<f32>,
+
+        /// Mask footer area on first page only (height in inches, e.g., "0.5")
+        #[arg(long, value_name = "INCHES")]
+        mask_footer: Option<f32>,
+
+        /// Mask header area on all pages (height in inches, e.g., "0.5")
+        #[arg(long, value_name = "INCHES")]
+        mask_header_all: Option<f32>,
+
+        /// Mask footer area on all pages (height in inches, e.g., "0.5")
+        #[arg(long, value_name = "INCHES")]
+        mask_footer_all: Option<f32>,
+
+        /// Mask color (default: white). Format: "#rrggbb" or "#rgb"
+        #[arg(long, value_name = "COLOR", default_value = "#ffffff")]
+        mask_color: String,
+
         /// Open the output file after creation
         #[arg(long)]
         open: bool,
@@ -143,6 +203,26 @@ enum Commands {
         #[arg(long)]
         footer_font: Option<String>,
 
+        /// Mask header area on first page only (height in inches, e.g., "0.5")
+        #[arg(long, value_name = "INCHES")]
+        mask_header: Option<f32>,
+
+        /// Mask footer area on first page only (height in inches, e.g., "0.5")
+        #[arg(long, value_name = "INCHES")]
+        mask_footer: Option<f32>,
+
+        /// Mask header area on all pages (height in inches, e.g., "0.5")
+        #[arg(long, value_name = "INCHES")]
+        mask_header_all: Option<f32>,
+
+        /// Mask footer area on all pages (height in inches, e.g., "0.5")
+        #[arg(long, value_name = "INCHES")]
+        mask_footer_all: Option<f32>,
+
+        /// Mask color (default: white). Format: "#rrggbb" or "#rgb"
+        #[arg(long, value_name = "COLOR", default_value = "#ffffff")]
+        mask_color: String,
+
         /// Open the output file after creation
         #[arg(long)]
         open: bool,
@@ -164,20 +244,28 @@ fn main() {
         }
         Commands::Headers {
             input, output, title, footer_left, footer_center, footer_right,
-            date, font, header_font, footer_font, open,
+            date, font, header_font, footer_font,
+            mask_header, mask_footer, mask_header_all, mask_footer_all, mask_color,
+            open,
         } => {
             cmd_headers(
                 input, output, title, footer_left, footer_center, footer_right,
-                date, font, header_font, footer_font, open,
+                date, font, header_font, footer_font,
+                mask_header, mask_footer, mask_header_all, mask_footer_all, mask_color,
+                open,
             )
         }
         Commands::Build {
             inputs, output, title, footer_left, footer_center, footer_right,
-            date, font, header_font, footer_font, open,
+            date, font, header_font, footer_font,
+            mask_header, mask_footer, mask_header_all, mask_footer_all, mask_color,
+            open,
         } => {
             cmd_build(
                 inputs, output, title, footer_left, footer_center, footer_right,
-                date, font, header_font, footer_font, open,
+                date, font, header_font, footer_font,
+                mask_header, mask_footer, mask_header_all, mask_footer_all, mask_color,
+                open,
             )
         }
         Commands::Info { input } => {
@@ -276,6 +364,28 @@ fn cmd_merge(inputs: Vec<String>, output: PathBuf, open: bool) -> Result<(), Box
     Ok(())
 }
 
+/// Parse a hex color string to RGB tuple (0.0-1.0 for each component)
+fn parse_mask_color(color: &str) -> (f32, f32, f32) {
+    let hex = color.trim_start_matches('#');
+
+    if hex.len() == 6 {
+        // Full hex: #rrggbb
+        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
+        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
+        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
+        (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+    } else if hex.len() == 3 {
+        // Short hex: #rgb -> #rrggbb
+        let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).unwrap_or(255);
+        let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).unwrap_or(255);
+        let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).unwrap_or(255);
+        (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+    } else {
+        // Default to white
+        (1.0, 1.0, 1.0)
+    }
+}
+
 /// Add headers and footers to a PDF
 fn cmd_headers(
     input: PathBuf,
@@ -288,6 +398,11 @@ fn cmd_headers(
     font: Option<String>,
     header_font: Option<String>,
     footer_font: Option<String>,
+    mask_header: Option<f32>,
+    mask_footer: Option<f32>,
+    mask_header_all: Option<f32>,
+    mask_footer_all: Option<f32>,
+    mask_color: String,
     open: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !input.exists() {
@@ -304,6 +419,15 @@ fn cmd_headers(
     let header_spec = header_font.as_deref().map(FontSpec::parse).or_else(|| base_font.clone());
     let footer_spec = footer_font.as_deref().map(FontSpec::parse).or(base_font);
 
+    // Build mask options
+    let mask = MaskOptions {
+        header_height: mask_header,
+        footer_height: mask_footer,
+        header_all_height: mask_header_all,
+        footer_all_height: mask_footer_all,
+        color: parse_mask_color(&mask_color),
+    };
+
     // Build options
     let options = HeaderFooterOptions {
         title,
@@ -317,6 +441,7 @@ fn cmd_headers(
         footer_font_size: footer_spec.as_ref().and_then(|f| f.size).unwrap_or(14.0),
         header_font: header_spec,
         footer_font: footer_spec,
+        mask,
     };
 
     eprintln!("Adding headers/footers...");
@@ -343,6 +468,11 @@ fn cmd_build(
     font: Option<String>,
     header_font: Option<String>,
     footer_font: Option<String>,
+    mask_header: Option<f32>,
+    mask_footer: Option<f32>,
+    mask_header_all: Option<f32>,
+    mask_footer_all: Option<f32>,
+    mask_color: String,
     open: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Expand glob patterns
@@ -378,6 +508,15 @@ fn cmd_build(
     let header_spec = header_font.as_deref().map(FontSpec::parse).or_else(|| base_font.clone());
     let footer_spec = footer_font.as_deref().map(FontSpec::parse).or(base_font);
 
+    // Build mask options
+    let mask = MaskOptions {
+        header_height: mask_header,
+        footer_height: mask_footer,
+        header_all_height: mask_header_all,
+        footer_all_height: mask_footer_all,
+        color: parse_mask_color(&mask_color),
+    };
+
     // Build options
     let options = HeaderFooterOptions {
         title,
@@ -391,6 +530,7 @@ fn cmd_build(
         footer_font_size: footer_spec.as_ref().and_then(|f| f.size).unwrap_or(14.0),
         header_font: header_spec,
         footer_font: footer_spec,
+        mask,
     };
 
     eprintln!("Step 2: Adding headers/footers...");

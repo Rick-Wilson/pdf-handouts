@@ -1,6 +1,6 @@
 //! Demo of direct header/footer writing (new approach)
 
-use pdf_handouts::pdf::{merge_pdfs, add_headers_footers, MergeOptions, HeaderFooterOptions, FontSpec};
+use pdf_handouts::pdf::{merge_pdfs, add_headers_footers, MergeOptions, HeaderFooterOptions, FontSpec, MaskOptions};
 use chrono::NaiveDate;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         header_font: Some(FontSpec::parse("24pt #333333")),
         // Use FontSpec to set footer color to a slightly lighter gray
         footer_font: Some(FontSpec::parse("14pt #555555")),
+        mask: MaskOptions::new(),
     };
 
     add_headers_footers(merged_path, final_output_path, &header_footer_options)?;

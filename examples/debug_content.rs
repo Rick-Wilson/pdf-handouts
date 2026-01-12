@@ -1,5 +1,4 @@
-use std::env;
-use pdf_handouts::pdf::{HeaderFooterOptions, FontSpec};
+use pdf_handouts::pdf::{HeaderFooterOptions, MaskOptions};
 
 fn main() {
     let options = HeaderFooterOptions {
@@ -14,6 +13,7 @@ fn main() {
         footer_font_size: 14.0,
         header_font: None,
         footer_font: None,
+        mask: MaskOptions::new(),
     };
     
     // Simulate what should happen for each page
