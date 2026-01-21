@@ -1207,12 +1207,13 @@ fn wrap_content_and_append_xobject(doc: &mut Document, page_id: ObjectId) -> Res
 
 /// Add XObject reference to page's Resources dictionary
 fn add_xobject_to_page_resources(doc: &mut Document, page_id: ObjectId, xobject_id: ObjectId) -> Result<()> {
-    // First, get the resources dictionary (may need to dereference or inherit from parent)
-    let resources_dict = {
+    // First, get the resources dictionary and XObject subdictionary
+    // We need to dereference both if they are references
+    let (resources_dict, xobjects_dict) = {
         let page_obj = doc.get_object(page_id)?;
         if let Object::Dictionary(page_dict) = page_obj {
             // Try to get Resources from page directly
-            if let Ok(res) = page_dict.get(b"Resources") {
+            let res_dict = if let Ok(res) = page_dict.get(b"Resources") {
                 match res {
                     Object::Dictionary(dict) => dict.clone(),
                     Object::Reference(res_id) => {
@@ -1236,9 +1237,29 @@ fn add_xobject_to_page_resources(doc: &mut Document, page_id: ObjectId, xobject_
                 } else {
                     Dictionary::new()
                 }
-            }
+            };
+
+            // Now get the XObject subdictionary, dereferencing if needed
+            let xo_dict = if let Ok(xo) = res_dict.get(b"XObject") {
+                match xo {
+                    Object::Dictionary(dict) => dict.clone(),
+                    Object::Reference(xo_id) => {
+                        // Dereference to get the actual XObject dictionary
+                        if let Ok(Object::Dictionary(dict)) = doc.get_object(*xo_id) {
+                            dict.clone()
+                        } else {
+                            Dictionary::new()
+                        }
+                    }
+                    _ => Dictionary::new(),
+                }
+            } else {
+                Dictionary::new()
+            };
+
+            (res_dict, xo_dict)
         } else {
-            Dictionary::new()
+            (Dictionary::new(), Dictionary::new())
         }
     };
 
@@ -1248,14 +1269,8 @@ fn add_xobject_to_page_resources(doc: &mut Document, page_id: ObjectId, xobject_
     if let Object::Dictionary(ref mut page_dict) = page_obj {
         let mut new_resources = resources_dict;
 
-        // Get or create XObject subdictionary
-        let mut xobjects = if let Ok(Object::Dictionary(xo)) = new_resources.get(b"XObject") {
-            xo.clone()
-        } else {
-            Dictionary::new()
-        };
-
-        // Add our Form XObject as /HeaderFooter
+        // Use the dereferenced XObject subdictionary and add our header/footer
+        let mut xobjects = xobjects_dict;
         xobjects.set("HeaderFooter", Object::Reference(xobject_id));
 
         new_resources.set("XObject", Object::Dictionary(xobjects));
