@@ -10,3 +10,4 @@ test_page_count.rs
 ORIGINAL_DESIGN_LESSON_BUILDER.md
 ORIGINAL_DESIGN_PBN_TO_PDF.md
 activity-log.json
+.DS_Store
